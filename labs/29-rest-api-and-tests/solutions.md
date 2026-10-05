@@ -13,7 +13,7 @@
 ```rust
 use serde::Deserialize;
 
-#[derive(Debug, Default, Clone, Copy, PartialEq, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ContactSort {
     #[default]
@@ -30,6 +30,12 @@ separate `ContactSortParam` enum in `http/contacts.rs` and a `From` impl.
 `src/http/contacts.rs`:
 
 ```rust
+use super::extract::{AppJson, AppPath, AppQuery};
+use super::pagination::{Page, Pagination};
+use crate::contacts::{
+    Contact, ContactFilter, ContactId, ContactSort, Email, NewContact, parse_phone,
+};
+
 #[derive(Debug, Default, Deserialize)]
 pub struct ContactQuery {
     pub company_id: Option<u64>,
@@ -77,6 +83,8 @@ otherwise page 2 would be "the second 20 by id, sorted by name".
 The nested route lives in `companies.rs`, because its URL starts with `/companies/{id}`:
 
 ```rust
+use super::contacts::ContactResponse;
+
 pub async fn list_company_contacts(
     State(state): State<AppState>,
     AppPath(id): AppPath<u64>,
@@ -280,6 +288,8 @@ Reasoning:
 The shared piece goes first. `src/http/history.rs`:
 
 ```rust
+use crate::history::HistoryItem; // Lab 20's borrowed history entry
+
 pub fn routes() -> Router<AppState> {
     Router::new().route("/history", get(history))
 }
@@ -338,8 +348,8 @@ async fn history(
   conversion is done, nothing borrowed remains.
 - **History for a subject that doesn't exist** returns `[]`, not 404. `Crm::history` doesn't
   check existence, and arguably "no history" is a true answer. If you prefer a 404, check the
-  subject first (you'd need a public "subject exists" method on `Crm`; Lab 20 has a private one
-  for `log_activity`). Either is fine if it's deliberate and tested.
+  subject first with `crm.check_subject(subject)?` (Lab 20's existence check, the one
+  `log_activity` uses). Either is fine if it's deliberate and tested.
 
 `src/http/activities.rs` (the interesting parts):
 

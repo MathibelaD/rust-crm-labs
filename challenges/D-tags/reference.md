@@ -91,10 +91,14 @@ mirrors the eventual SQL schema more literally, but the database will give you j
 
 **`#[serde(default)]` is the backward-compatibility switch.** Without it, every existing data
 file fails to load with `missing field "tags"`, a breaking change for your own users. Adding the
-field also breaks every `Company { .. }` struct literal at compile time (E0063, "missing field
-`tags`"): in `Crm::add_company`, `add_contact` and in `Lead::convert`. Fill them with
-`tags: Default::default()`. Converted leads start untagged. Leads aren't taggable, so there's
-nothing to carry over.
+field also breaks every `Company { .. }` / `Contact { .. }` struct literal at compile time
+(E0063, "missing field `tags`"): in `Company::new`, `Contact::new` and in `Lead::convert`
+(`src/leads/conversion.rs`). Fill them with `tags: Default::default()`. Converted leads start
+untagged. Leads aren't taggable, so there's nothing to carry over. The new `tag` field on the
+filters (section 5) does the same to the few full `CompanyFilter { .. }` / `ContactFilter { .. }`
+literals: the CLI parser's unit tests in `src/cli/parser.rs` and a test in
+`src/companies/filter.rs`. They get `tag: None`. The CLI itself builds its filters from
+`::default()` and has no tag commands, but it must still compile.
 
 ## 3. One generic implementation via a trait
 
@@ -232,7 +236,8 @@ impl TryFrom<CompanyQuery> for CompanyFilter {
         })
     }
 }
-// CompanyFilter::matches gains:  if let Some(tag) = &self.tag && !c.tags.contains(tag) { return false; }
+// CompanyFilter::matches gains a third condition:
+//     && self.tag.as_ref().is_none_or(|t| c.tags.contains(t))
 ```
 
 …and `CompanyResponse`/`ContactResponse` gain `pub tags: Vec<String>`, filled by a helper

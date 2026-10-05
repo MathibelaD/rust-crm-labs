@@ -86,10 +86,10 @@ Example session (fresh data file; company 1 = Acme, company 2 = Globex, contact 
 ```text
 POST   /companies/1/tags/Enterprise      → 201 {"tags":["enterprise"]}
 POST   /companies/1/tags/enterprise      → 200 {"tags":["enterprise"]}
-POST   /companies/1/tags/a%2Fb           → 422 {"error":{"code":"validation_failed","message":"request has invalid fields","fields":[{"field":"tag","message":"invalid tag: a/b"}]}}
+POST   /companies/1/tags/a%2Fb           → 422 {"error":{"code":"validation_failed","message":"request has invalid fields","fields":[{"field":"tag","message":"'a/b' is not a valid tag"}]}}
 POST   /companies/2/tags/smb             → 201 {"tags":["smb"]}
 POST   /contacts/1/tags/ENTERPRISE       → 201 {"tags":["enterprise"]}
-POST   /contacts/99/tags/vip             → 404 {"error":{"code":"not_found","message":"contact #99 not found"}}
+POST   /contacts/99/tags/vip             → 404 {"error":{"code":"not_found","message":"no contact with id 99"}}
 GET    /companies?tag=Enterprise         → 200 {"items":[{"id":1,"name":"Acme",...,"tags":["enterprise"]}],"page":1,"per_page":20,"total":1}
 GET    /tags                             → 200 [{"tag":"enterprise","companies":1,"contacts":1},{"tag":"smb","companies":1,"contacts":0}]
 DELETE /companies/2/tags/smb             → 204

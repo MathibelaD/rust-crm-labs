@@ -52,7 +52,9 @@ your idempotency). A *B-tree* set iterates in sorted order (that's your sorted `
 Deleting an entity deletes its tags automatically, so counts can't go stale.
 
 The compiler will then complain about every `Company { ... }` / `Contact { ... }` literal. That's
-your to-do list (crm.rs, lead conversion, maybe tests).
+your to-do list (the `new` constructors, lead conversion, maybe tests). Later, the new `tag`
+field on `CompanyFilter`/`ContactFilter` does the same to the full filter literals in unit tests
+(`src/cli/parser.rs`, `src/companies/filter.rs`): `tag: None` there.
 
 </details>
 

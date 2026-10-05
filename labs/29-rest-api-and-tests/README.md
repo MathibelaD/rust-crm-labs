@@ -75,7 +75,7 @@ Right now `src/http/mod.rs` lists every route of every resource. With seven reso
 function becomes a 60-line wall, and adding an endpoint means editing two files. Let each module
 declare its own routes and let `mod.rs` assemble them.
 
-> 🟢 **FOLLOW ALONG**: at the top of `src/http/companies.rs`
+> 🟢 **FOLLOW ALONG**: at the top of `src/http/companies.rs` (the two `use` lines replace `use axum::Json;`)
 
 ```rust
 use axum::routing::get;
@@ -122,6 +122,9 @@ pub fn router(state: AppState) -> Router {
 }
 ```
 
+`mod.rs` no longer calls `get` itself, so delete its `use axum::routing::get;` (the compiler
+warns about it otherwise).
+
 Handlers that are only referenced from their module's `routes()` no longer need to be `pub`.
 Making them private (`async fn health()`) shrinks the module's public surface. Keep the
 DTOs `pub`: tests and other modules may use them.
@@ -151,7 +154,7 @@ diff. You'll try `nest` in the Experiment section.
 It compiles fine. Then the server dies **while building the router**:
 
 ```text
-thread 'main' (641046) panicked at src/http/mod.rs:24:10:
+thread 'main' (641046) panicked at src/http/mod.rs:20:10:
 Overlapping method route. Handler for `GET /companies` already exists
 ```
 
@@ -954,12 +957,12 @@ Before reading on, let the compiler explain two lines of `send`.
 
 ```text
 error[E0599]: no method named `oneshot` found for struct `Router<S>` in the current scope
-   --> tests/api/helpers.rs:21:10
+   --> tests/api/helpers.rs:20:10
     |
- 19 |       let response = app
+ 18 |       let response = app
     |  ____________________-
- 20 | |         .clone()
- 21 | |         .oneshot(request)
+ 19 | |         .clone()
+ 20 | |         .oneshot(request)
     | |_________-^^^^^^^
     |
     = help: items from traits can only be used if the trait is in scope
@@ -1204,9 +1207,9 @@ The `curl` session (IDs assume a fresh data file):
 {"id":1,"name":"Grace Hopper","email":"grace@navy.example","company_name":"US Navy","source":"referral","status":"new","notes":null}
 {"id":1,"name":"Grace Hopper","email":"grace@navy.example","company_name":"US Navy","source":"referral","status":"qualified","notes":null}
 {"company_id":6,"contact_id":1,"deal_id":1}
-{"error":{"code":"not_found","message":"lead #1 not found"}}
+{"error":{"code":"not_found","message":"no lead with id 1"}}
 {"id":2,"name":"Alan Turing","email":"alan@bletchley.example","company_name":null,"source":"other","status":"new","notes":null}
-{"error":{"code":"conflict","message":"lead #2 is not qualified"}}
+{"error":{"code":"conflict","message":"lead #2 must be qualified before it can be converted"}}
 {"error":{"code":"bad_request","message":"Expected request with `Content-Type: application/json`"}}
 ```
 
@@ -1246,12 +1249,12 @@ suggestion and write `&'static Company`, and you get the real answer:
 
 ```text
 error[E0515]: cannot return value referencing local variable `crm`
-   --> src/http/companies.rs:147:5
-    |
-146 |     let page = Page::paginate(crm.list_companies(&filter), pagination);
-    |                               --- `crm` is borrowed here
-147 |     Json(page)
-    |     ^^^^^^^^^^ returns a value referencing data owned by the current function
+  --> src/http/companies.rs:86:5
+   |
+85 |     let page = Page::paginate(crm.list_companies(&filter), pagination);
+   |                               --- `crm` is borrowed here
+86 |     Json(page)
+   |     ^^^^^^^^^^ returns a value referencing data owned by the current function
 ```
 
 The companies live inside the `Crm`, which is only reachable through the guard `crm`, and the
@@ -1457,6 +1460,8 @@ Answer without looking at the code:
 Then verify: `cargo fmt --check && cargo clippy --all-targets && cargo test`
 
 ## Git Commit
+Delete `lab29-demo.json` first (or add it to `.gitignore`), so `git add .` doesn't commit it.
+
 ```bash
 git add .
 git commit -m "Add remaining REST endpoints"
