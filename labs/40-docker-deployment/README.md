@@ -526,9 +526,11 @@ command starts a production-like stack on any machine with Docker.
 `depends_on: [db]` only waits for the db **container to start**, not for Postgres to accept
 connections. Postgres takes a few seconds to initialise (much longer on the first run, when it
 creates the data directory). Without a healthcheck, the API starts, fails to connect, and
-exits. That's why you need a healthcheck.
+exits. That's why you need a healthcheck, and your `db` service has had one since Lab 30
+(it's what made `docker compose ps` say `running (healthy)`). Until now nothing waited on it.
 
-> 🟢 **FOLLOW ALONG**: give `db` a healthcheck (keep the rest of your Lab 30 service as it is):
+> 🟢 **FOLLOW ALONG**: give the healthcheck a cold-start allowance: slower polling and a
+> `start_period` (keep the rest of your Lab 30 service as it is):
 
 ```yaml
 services:
@@ -620,9 +622,11 @@ it, and only then tighten constraints or drop the old one ("expand, then contrac
 > docker compose down -v          # -v deletes the pgdata volume: a brand-new database
 > docker compose up --build
 > ```
-> Find the migration log lines. Then `docker compose restart api`. Do they run again? Why not?
-> (Hint: `SELECT version, description FROM _sqlx_migrations;` via
-> `docker compose exec db psql -U crm`.)
+> The API doesn't log individual migrations (sqlx's own lines are below the `sqlx=warn`
+> filter), so ask the database: `SELECT version, description, installed_on FROM _sqlx_migrations;`
+> via `docker compose exec db psql -U crm`. Every migration was applied when the API started.
+> Then `docker compose restart api` and run the query again. Do they run again? Why not?
+> (Hint: look at `installed_on`.)
 
 Try the whole stack end to end:
 
@@ -863,23 +867,28 @@ curl -i https://rust-crm-<yourname>.fly.dev/ready
 ## ✅ Expected Result
 
 `docker compose up --build`: both services start, `db` becomes `healthy` **before** `api`
-starts, and the API logs JSON lines (migrations applied, server listening on `0.0.0.0:8080`,
-worker started). The exact fields depend on your Lab 37 setup.
+starts, and the API logs JSON lines (`starting rust-crm` with `"env":"production"`,
+`listening` on `0.0.0.0:8080`, `job worker started`, `job scheduler started`). The exact fields
+depend on your Lab 37 setup.
 
-Health and readiness (verified against a real Postgres):
+Health and readiness (verified against a real Postgres; request ids and dates will differ):
 
 ```text
 $ curl -i localhost:8080/health
 HTTP/1.1 200 OK
 content-type: application/json
+x-request-id: eaeba0f2-82a2-4e5a-98aa-e42d2a136a04
 content-length: 15
+date: Mon, 05 Oct 2026 17:50:26 GMT
 
 {"status":"ok"}
 
 $ curl -i localhost:8080/ready
 HTTP/1.1 200 OK
 content-type: application/json
+x-request-id: d55efd80-498d-44ef-a738-a073e845201e
 content-length: 18
+date: Mon, 05 Oct 2026 17:50:26 GMT
 
 {"status":"ready"}
 ```
@@ -890,7 +899,9 @@ answers after ~2 seconds with:
 ```text
 HTTP/1.1 503 Service Unavailable
 content-type: application/json
+x-request-id: 5b0c66b6-ca1d-410e-b4db-7b0cec607350
 content-length: 24
+date: Mon, 05 Oct 2026 17:49:04 GMT
 
 {"status":"unavailable"}
 ```

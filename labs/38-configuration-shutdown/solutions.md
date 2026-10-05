@@ -129,7 +129,7 @@ pub struct AppState {
 }
 ```
 
-`src/startup.rs`, in `Application::build`:
+`src/startup.rs`: add `use chrono::TimeDelta;` to the imports, then in `Application::build`:
 
 ```rust
 let state = AppState {
@@ -197,7 +197,11 @@ async fn server_stops_when_the_shutdown_future_completes() {
     }));
 
     // Up...
-    assert!(reqwest::get(format!("http://127.0.0.1:{port}/health")).await.is_ok());
+    assert!(
+        reqwest::get(format!("http://127.0.0.1:{port}/health"))
+            .await
+            .is_ok()
+    );
 
     // ...then down, promptly and cleanly.
     tx.send(()).unwrap();
@@ -208,7 +212,11 @@ async fn server_stops_when_the_shutdown_future_completes() {
     assert!(result.is_ok(), "{result:?}");
 
     // The listener is gone: new connections are refused.
-    assert!(reqwest::get(format!("http://127.0.0.1:{port}/health")).await.is_err());
+    assert!(
+        reqwest::get(format!("http://127.0.0.1:{port}/health"))
+            .await
+            .is_err()
+    );
 }
 ```
 

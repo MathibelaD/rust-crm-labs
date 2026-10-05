@@ -215,16 +215,25 @@ mod tests {
 
     #[test]
     fn jobs_serialize_with_a_kind_tag() {
-        let job = Job::SendReminder { activity_id: ActivityId(42) };
+        let job = Job::SendReminder {
+            activity_id: ActivityId(42),
+        };
         let json = serde_json::to_value(&job).unwrap();
-        assert_eq!(json, serde_json::json!({ "kind": "send_reminder", "activity_id": 42 }));
+        assert_eq!(
+            json,
+            serde_json::json!({ "kind": "send_reminder", "activity_id": 42 })
+        );
         assert_eq!(job.kind(), json["kind"]);
     }
 
     #[test]
     fn extra_fields_in_the_payload_are_ignored() {
-        let payload = serde_json::json!({ "kind": "stale_deal_scan", "key": "stale_deal_scan:2026-10-05" });
-        assert_eq!(serde_json::from_value::<Job>(payload).unwrap(), Job::StaleDealScan);
+        let payload =
+            serde_json::json!({ "kind": "stale_deal_scan", "key": "stale_deal_scan:2026-10-05" });
+        assert_eq!(
+            serde_json::from_value::<Job>(payload).unwrap(),
+            Job::StaleDealScan
+        );
     }
 }
 ```
@@ -636,7 +645,12 @@ pub struct LogMailer;
 impl Mailer for LogMailer {
     // An impl may still use `async fn`: the compiler checks that this future is `Send`.
     async fn send(&self, to: &Email, subject: &str, body: &str) -> Result<(), MailError> {
-        tracing::info!(to = to.as_str(), subject, body_len = body.len(), "email logged, not sent");
+        tracing::info!(
+            to = to.as_str(),
+            subject,
+            body_len = body.len(),
+            "email logged, not sent"
+        );
         tracing::debug!(body, "email body");
         Ok(())
     }
@@ -666,7 +680,10 @@ mod tests {
 
     impl Mailer for RecordingMailer {
         async fn send(&self, to: &Email, subject: &str, _body: &str) -> Result<(), MailError> {
-            self.sent.lock().unwrap().push((to.as_str().to_string(), subject.to_string()));
+            self.sent
+                .lock()
+                .unwrap()
+                .push((to.as_str().to_string(), subject.to_string()));
             Ok(())
         }
     }
@@ -701,8 +718,9 @@ error[E0038]: the trait `Mailer` is not dyn compatible
    |
 17 | pub trait Mailer: Send + Sync + 'static {
    |           ------ this trait is not dyn compatible...
-18 |     fn send(&self, to: &Email, subject: &str, body: &str) -> impl Future<Output = Result<(), MailError>> + Send;
-   |                                                              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ ...because method `send` references an `impl Trait` type in its return type
+...
+23 |     ) -> impl Future<Output = Result<(), MailError>> + Send;
+   |          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ ...because method `send` references an `impl Trait` type in its return type
 ```
 
 Same wall as Lab 31's async repository trait: a vtable needs one concrete return type per
@@ -721,10 +739,11 @@ and a done flag.
 
 ```rust
 pub enum ActivityKind {
-    Call { minutes: u32 },
-    Email { subject: String },
-    Meeting { starts_at: DateTime<Utc>, attendees: Vec<ContactId> },  // whatever yours has
-    FollowUp { due_at: DateTime<Utc>, done: bool },
+    // ... Call, Email, Meeting: whatever yours has ...
+    FollowUp {
+        due_at: DateTime<Utc>,
+        done: bool,
+    },
 }
 ```
 
@@ -732,18 +751,18 @@ and run `cargo check`. Every exhaustive `match` on `ActivityKind` now fails, for
 
 ```text
 error[E0004]: non-exhaustive patterns: `&ActivityKind::FollowUp { .. }` not covered
-  --> src/activities/model.rs:22:15
+  --> src/activities/model.rs:50:15
    |
-22 |         match self {
+50 |         match self {
    |               ^^^^ pattern `&ActivityKind::FollowUp { .. }` not covered
    |
 note: `ActivityKind` defined here
-  --> src/activities/model.rs:13:10
+  --> src/activities/model.rs:31:10
    |
-13 | pub enum ActivityKind {
+31 | pub enum ActivityKind {
    |          ^^^^^^^^^^^^
 ...
-17 |     FollowUp { due_at: DateTime<Utc>, done: bool },
+42 |     FollowUp {
    |     -------- not covered
 ```
 
@@ -853,7 +872,10 @@ pub async fn stale_deal_scan(
     now: DateTime<Utc>,
 ) -> anyhow::Result<ScanReport> {
     let cutoff = now - TimeDelta::days(stale_after_days);
-    let follow_up = ActivityKind::FollowUp { due_at: now + TimeDelta::days(1), done: false };
+    let follow_up = ActivityKind::FollowUp {
+        due_at: now + TimeDelta::days(1),
+        done: false,
+    };
     let details = serde_json::to_value(&follow_up).context("serializing follow-up")?;
     let summary = format!("No activity for {stale_after_days} days: follow up on this deal");
 
@@ -902,13 +924,20 @@ pub async fn stale_deal_scan(
     let mut reminders_enqueued = 0;
     for activity_id in due {
         let job = Job::SendReminder { activity_id };
-        if queue::enqueue(&mut *tx, &job, now).await.context("enqueuing reminder")?.is_some() {
+        if queue::enqueue(&mut *tx, &job, now)
+            .await
+            .context("enqueuing reminder")?
+            .is_some()
+        {
             reminders_enqueued += 1;
         }
     }
 
     tx.commit().await.context("committing stale deal scan")?;
-    Ok(ScanReport { follow_ups_created, reminders_enqueued })
+    Ok(ScanReport {
+        follow_ups_created,
+        reminders_enqueued,
+    })
 }
 
 /// Emails the owner of a follow-up. Does nothing if it's gone or already done.
@@ -928,7 +957,10 @@ pub async fn send_reminder<M: Mailer>(
     .context("loading follow-up")?;
 
     let Some(row) = row else {
-        tracing::info!(activity_id = activity_id.0, "follow-up is gone, nothing to send");
+        tracing::info!(
+            activity_id = activity_id.0,
+            "follow-up is gone, nothing to send"
+        );
         return Ok(());
     };
     let ActivityKind::FollowUp { due_at, done } =
@@ -937,14 +969,20 @@ pub async fn send_reminder<M: Mailer>(
         anyhow::bail!("activity {} is not a follow-up", activity_id.0);
     };
     if done {
-        tracing::info!(activity_id = activity_id.0, "follow-up already done, nothing to send");
+        tracing::info!(
+            activity_id = activity_id.0,
+            "follow-up already done, nothing to send"
+        );
         return Ok(());
     }
 
     let to = Email::parse(&row.email).context("owner has an invalid email")?;
     let subject = format!("Follow-up due {}", due_at.format("%Y-%m-%d %H:%M UTC"));
     let body = format!("{}\n\nDeal #{}", row.summary, row.subject_id);
-    mailer.send(&to, &subject, &body).await.context("sending reminder email")?;
+    mailer
+        .send(&to, &subject, &body)
+        .await
+        .context("sending reminder email")?;
     Ok(())
 }
 ```
@@ -1330,10 +1368,11 @@ async fn insert_user(pool: &PgPool, email: &str) -> i64 {
 
 /// A deal created `age_days` ago, owned by `owner`.
 async fn insert_deal(pool: &PgPool, owner: i64, stage: &str, age_days: i64) -> i64 {
-    let company: i64 = sqlx::query_scalar("INSERT INTO companies (name) VALUES ('Acme') RETURNING id")
-        .fetch_one(pool)
-        .await
-        .unwrap();
+    let company: i64 =
+        sqlx::query_scalar("INSERT INTO companies (name) VALUES ('Acme') RETURNING id")
+            .fetch_one(pool)
+            .await
+            .unwrap();
     sqlx::query_scalar(
         "INSERT INTO deals (company_id, title, value_cents, stage, owner_id, created_at) \
          VALUES ($1, 'Big deal', 100000, $2, $3, now() - make_interval(days => $4::int)) RETURNING id",
@@ -1350,11 +1389,18 @@ async fn insert_deal(pool: &PgPool, owner: i64, stage: &str, age_days: i64) -> i
 #[sqlx::test]
 async fn enqueue_is_idempotent_while_the_job_is_pending(pool: PgPool) {
     let now = Utc::now();
-    let first = queue::enqueue(&pool, &Job::StaleDealScan, now).await.unwrap();
-    let second = queue::enqueue(&pool, &Job::StaleDealScan, now).await.unwrap();
+    let first = queue::enqueue(&pool, &Job::StaleDealScan, now)
+        .await
+        .unwrap();
+    let second = queue::enqueue(&pool, &Job::StaleDealScan, now)
+        .await
+        .unwrap();
 
     assert!(first.is_some());
-    assert_eq!(second, None, "same kind + same key while queued = no new job");
+    assert_eq!(
+        second, None,
+        "same kind + same key while queued = no new job"
+    );
 }
 
 #[sqlx::test]
@@ -1368,13 +1414,31 @@ async fn stale_deal_scan_creates_one_follow_up_per_stale_deal(pool: PgPool) {
     let first = handlers::stale_deal_scan(&pool, 14, now).await.unwrap();
     let second = handlers::stale_deal_scan(&pool, 14, now).await.unwrap();
 
-    assert_eq!(first, ScanReport { follow_ups_created: 1, reminders_enqueued: 1 });
-    assert_eq!(second, ScanReport { follow_ups_created: 0, reminders_enqueued: 0 }, "running twice is harmless");
+    assert_eq!(
+        first,
+        ScanReport {
+            follow_ups_created: 1,
+            reminders_enqueued: 1
+        }
+    );
+    assert_eq!(
+        second,
+        ScanReport {
+            follow_ups_created: 0,
+            reminders_enqueued: 0
+        },
+        "running twice is harmless"
+    );
 
     // Read it back through the normal repository: proves the JSON shape matches what the app reads.
-    let history = activities::db::list_for_subject(&pool, Subject::Deal(DealId(stale))).await.unwrap();
+    let history = activities::db::list_for_subject(&pool, Subject::Deal(DealId(stale)))
+        .await
+        .unwrap();
     assert_eq!(history.len(), 1);
-    assert!(matches!(history[0].kind, ActivityKind::FollowUp { done: false, .. }));
+    assert!(matches!(
+        history[0].kind,
+        ActivityKind::FollowUp { done: false, .. }
+    ));
     assert_eq!(history[0].created_by.0, rep);
 }
 ```
@@ -1451,7 +1515,7 @@ Stop the server with Ctrl+C.
 2026-10-05T14:57:27.443255Z  INFO rust_crm::jobs::scheduler: stale deal scan enqueued job_id=1
 2026-10-05T14:57:28.460547Z  INFO process{job_id=1 kind="stale_deal_scan" attempt=1}: rust_crm::jobs::handlers: stale deal scan finished follow_ups_created=1 reminders_enqueued=1
 2026-10-05T14:57:28.461376Z  INFO process{job_id=1 kind="stale_deal_scan" attempt=1}: rust_crm::jobs::worker: job done
-2026-10-05T14:57:28.463424Z  INFO process{job_id=2 kind="send_reminder" attempt=1}: rust_crm::notifications: email logged, not sent to="ada@example.com" subject="Follow-up due 2026-10-06 14:57 UTC" body_len=56
+2026-10-05T14:57:28.463424Z  INFO process{job_id=2 kind="send_reminder" attempt=1}: rust_crm::notifications: email logged, not sent to="bob@example.com" subject="Follow-up due 2026-10-06 14:57 UTC" body_len=56
 2026-10-05T14:57:28.464130Z  INFO process{job_id=2 kind="send_reminder" attempt=1}: rust_crm::jobs::worker: job done
 ^C2026-10-05T14:57:31.094993Z  INFO rust_crm::shutdown: received Ctrl+C, shutting down
 2026-10-05T14:57:31.095054Z  INFO rust_crm::jobs::worker: job worker stopped
@@ -1512,21 +1576,21 @@ second, and archiving old `done` rows. Each is a few lines of SQL once you under
 > and watch. Predict the times of the attempts.
 
 ```text
-… INFO  process{job_id=4 kind="send_reminder" attempt=1}: rust_crm::notifications: email logged, not sent to="ada@example.com" subject="Follow-up due 2026-10-06 14:57 UTC" body_len=56
-… WARN  process{job_id=4 kind="send_reminder" attempt=1}: rust_crm::jobs::worker: job failed, will retry error=sending reminder email: mail transport failed: SMTP server unreachable retry_at=2026-10-05 14:58:11.001769 UTC
-… INFO  process{job_id=4 kind="send_reminder" attempt=2}: rust_crm::notifications: email logged, not sent …
-… WARN  process{job_id=4 kind="send_reminder" attempt=2}: rust_crm::jobs::worker: job failed, will retry error=sending reminder email: mail transport failed: SMTP server unreachable retry_at=2026-10-05 14:58:51.081776 UTC
+… INFO  process{job_id=5 kind="send_reminder" attempt=1}: rust_crm::notifications: email logged, not sent to="bob@example.com" subject="Follow-up due 2026-10-06 14:57 UTC" body_len=56
+… WARN  process{job_id=5 kind="send_reminder" attempt=1}: rust_crm::jobs::worker: job failed, will retry error=sending reminder email: mail transport failed: SMTP server unreachable retry_at=2026-10-05 14:58:11.001769 UTC
+… INFO  process{job_id=5 kind="send_reminder" attempt=2}: rust_crm::notifications: email logged, not sent …
+… WARN  process{job_id=5 kind="send_reminder" attempt=2}: rust_crm::jobs::worker: job failed, will retry error=sending reminder email: mail transport failed: SMTP server unreachable retry_at=2026-10-05 14:58:51.081776 UTC
 ```
 
 ```text
  id |     kind      | status | attempts | max_attempts |  run_at  |                               last_error
 ----+---------------+--------+----------+--------------+----------+------------------------------------------------------------------------
-  4 | send_reminder | queued |        2 |            5 | 16:58:51 | sending reminder email: mail transport failed: SMTP server unreachable
+  5 | send_reminder | queued |        2 |            5 | 16:58:51 | sending reminder email: mail transport failed: SMTP server unreachable
 ```
 
 20 s, then 40 s (requires Your Turn 1). The error chain from `anyhow`'s `.context(...)` ends up
 in `last_error`. Now stop the server, revert the mailer, start it again before or after
-`run_at`: what happens to job 4?
+`run_at`: what happens to job 5?
 
 > 🟡 **EXPERIMENT 2 (remove `SKIP LOCKED`)**: after Your Turn 4, delete the line
 > `FOR UPDATE SKIP LOCKED` from `claim_next` entirely and run
@@ -1676,7 +1740,7 @@ Then verify: `cargo fmt --check && cargo clippy --all-targets -- -D warnings && 
 ```bash
 git add .
 git commit -m "Add Postgres job queue"
-# ... after the handlers, scheduler and Your Turns ...
+# ... Your Turns ...
 git add .
 git commit -m "Add stale deal and reminder jobs"
 git tag lab-39

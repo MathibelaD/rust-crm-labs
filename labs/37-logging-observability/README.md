@@ -59,8 +59,8 @@ grep -rn "println!\|eprintln!" src/
 You should find at least two (your exact lines may differ):
 
 ```text
-src/main.rs:35:    println!("Listening on http://{}", listener.local_addr()?);
-src/http/error.rs:62:            eprintln!("internal error: {message}");
+src/main.rs:36:    println!("Listening on http://{}", listener.local_addr()?);
+src/http/error.rs:98:            eprintln!("internal error: {message}");
 ```
 
 Now picture the server handling 50 requests a second, and that `eprintln!` firing once:
@@ -510,9 +510,9 @@ check at startup; they have no request span because no request caused them.
 
 ```text
 error[E0277]: `AppState` doesn't implement `std::fmt::Debug`
-   --> src/http/auth.rs:117:1
+   --> src/http/auth.rs:41:1
     |
-117 | #[tracing::instrument]
+ 41 | #[tracing::instrument]
     | ^^^^^^^^^^^^^^^^^^^^^^ unsatisfied trait bound
     |
 help: the trait `std::fmt::Debug` is not implemented for `AppState`
@@ -673,7 +673,8 @@ Finally, check you've caught every stray print:
 grep -rn "println!\|eprintln!" src/
 ```
 
-Only matches inside `#[cfg(test)]` code are acceptable (test output is captured by `cargo test`).
+Only matches inside `#[cfg(test)]` code are acceptable (test output is captured by `cargo test`),
+plus the `// was println!` comment in `main.rs` if you kept it.
 
 ---
 

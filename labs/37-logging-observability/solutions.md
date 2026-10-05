@@ -42,8 +42,11 @@ mod tests {
 
     #[test]
     fn error_chain_of_an_error_without_sources_is_its_message() {
-        let err = CrmError::NotFound { entity: "deal", id: 3 };
-        assert_eq!(error_chain(&err), "deal 3 not found");
+        let err = CrmError::NotFound {
+            entity: "deal",
+            id: 3,
+        };
+        assert_eq!(error_chain(&err), "no deal with id 3");
     }
 
     #[test]
@@ -262,7 +265,11 @@ async fn login(…) -> … {
     let user = match user {
         Some(user) if password_ok => user,
         Some(user) => {
-            tracing::warn!(user_id = user.id.0, reason = "wrong_password", "login failed");
+            tracing::warn!(
+                user_id = user.id.0,
+                reason = "wrong_password",
+                "login failed"
+            );
             return Err(AuthError::InvalidCredentials.into());
         }
         None => {
@@ -282,7 +289,7 @@ WARN request{method=POST path=/auth/login request_id=…}:login: rust_crm::http:
 INFO request{method=POST path=/deals request_id=… user_id=1}:create_deal{company_id=1}: rust_crm::http::deals: deal created deal_id=1
 ```
 
-With `RUST_LOG=trace`, a register + two logins + a deal produced 57 log lines and **zero**
+With `RUST_LOG=trace`, a register + two logins + a deal produced 33 log lines and **zero**
 occurrences of the password, the email or the token.
 
 **Why it's written this way**
@@ -330,7 +337,7 @@ dependency" in production.
   `log_response` events stay, because the callback function lives in `rust_crm::http`.
 
 **Experiment 4 (`err`).** One normal 404 produces
-`ERROR request{…}:get_deal{id=999}:get{id=DealId(999)}: rust_crm::deals::db: error=deal 999 not found`
+`ERROR request{…}:get_deal{id=999}:get{id=DealId(999)}: rust_crm::deals::db: error=no deal with id 999`
 from the instrumented `get`, plus the response line. A not-found deal is a client mistake, not
 a server failure, yet it would page someone at 3 a.m. `err` belongs on functions that are the
 *last* to see an error (a background job's top-level function, for example), where logging is

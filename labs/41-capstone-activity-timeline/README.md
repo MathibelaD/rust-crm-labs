@@ -79,7 +79,7 @@ decision in your README; FR-stretch: historical membership).
 
 - Items are ordered **newest first** by their timestamp: `activities.occurred_at`,
   `notes.created_at`, and the event's own time for the two event types.
-- Two items can share a timestamp, and in this CRM they *will* (see Pitfalls in the hints).
+- Two items can share a timestamp, and in this CRM they *will* (the Schema hints explain why).
   Ordering must be a **total, deterministic order**: the same data always produces the same
   sequence. You choose the tie-breaker and document it.
 
@@ -190,7 +190,7 @@ Authorization: Bearer <access token>
 | `subject` | Lab 20's `Subject` format: `company:N`, `contact:N`, `deal:N`. For `lead_converted`: `company:C` |
 | `actor` | The user who performed it: `created_by` for activities and notes (Lab 35; it's `NOT NULL`, and Lab 39's stale-deal follow-ups use the deal's owner), the event's actor for events. `null` only if that user no longer exists or your design allows system-recorded events |
 | `summary` | Human-readable, at most 120 characters (truncate on a **char boundary**, Lab 09) |
-| `data` | Type-specific, exactly: `activity` → `{activity_id, kind, details}` (same `kind`/`details` shape as `GET /activities`); `note` → `{note_id, body}`; `deal_stage_changed` → `{deal_id, deal_title, from, to}`; `lead_converted` → `{lead_id, contact_id, deal_id}` (`deal_id` may be `null`) |
+| `data` | Type-specific, exactly: `activity` → `{activity_id, kind, details}` (`kind` is the `activities.kind` name such as `"call"`; `details` is the tagged object `GET /activities` returns as its `kind`, e.g. `{"type":"call","minutes":5}`); `note` → `{note_id, body}`; `deal_stage_changed` → `{deal_id, deal_title, from, to}`; `lead_converted` → `{lead_id, contact_id, deal_id}` (`deal_id` may be `null`) |
 | `next_cursor` | Opaque string, or `null` on the last page |
 
 Money (if you include deal values anywhere) stays integer `value_cents`, as everywhere else.

@@ -69,7 +69,10 @@ DB test in `tests/jobs.rs` (add `FailOutcome` to the `queue` import):
 ```rust
 #[sqlx::test]
 async fn a_failed_job_is_retried_later_then_given_up(pool: PgPool) {
-    let id = queue::enqueue(&pool, &Job::StaleDealScan, Utc::now()).await.unwrap().unwrap();
+    let id = queue::enqueue(&pool, &Job::StaleDealScan, Utc::now())
+        .await
+        .unwrap()
+        .unwrap();
     sqlx::query("UPDATE jobs SET max_attempts = 2 WHERE id = $1")
         .bind(id)
         .execute(&pool)
@@ -81,7 +84,10 @@ async fn a_failed_job_is_retried_later_then_given_up(pool: PgPool) {
     let outcome = queue::fail(&pool, &job, "boom").await.unwrap();
     assert!(matches!(outcome, FailOutcome::RetryAt(at) if at > Utc::now()));
     assert_eq!(job_status(&pool, id).await, "queued");
-    assert!(queue::claim_next(&pool).await.unwrap().is_none(), "not runnable yet");
+    assert!(
+        queue::claim_next(&pool).await.unwrap().is_none(),
+        "not runnable yet"
+    );
 
     // Pretend the backoff has passed. Attempt 2 fails → 'failed' for good.
     sqlx::query("UPDATE jobs SET run_at = now() WHERE id = $1")
@@ -91,7 +97,10 @@ async fn a_failed_job_is_retried_later_then_given_up(pool: PgPool) {
         .unwrap();
     let job = queue::claim_next(&pool).await.unwrap().unwrap();
     assert_eq!(job.attempts, 2);
-    assert_eq!(queue::fail(&pool, &job, "boom again").await.unwrap(), FailOutcome::GaveUp);
+    assert_eq!(
+        queue::fail(&pool, &job, "boom again").await.unwrap(),
+        FailOutcome::GaveUp
+    );
     assert_eq!(job_status(&pool, id).await, "failed");
 }
 ```
@@ -123,7 +132,10 @@ async fn a_failed_job_is_retried_later_then_given_up(pool: PgPool) {
 /// Puts jobs whose worker disappeared (crash, `kill -9`, lost connection) back in the queue.
 /// A job is "stuck" when it has been 'running' for longer than `older_than`.
 /// Jobs that already used all their attempts are failed instead.
-pub async fn requeue_stuck(db: impl PgExecutor<'_>, older_than: TimeDelta) -> Result<u64, sqlx::Error> {
+pub async fn requeue_stuck(
+    db: impl PgExecutor<'_>,
+    older_than: TimeDelta,
+) -> Result<u64, sqlx::Error> {
     let result = sqlx::query!(
         "UPDATE jobs
          SET status = CASE WHEN attempts >= max_attempts THEN 'failed' ELSE 'queued' END,
@@ -163,7 +175,10 @@ Tests:
 ```rust
 #[sqlx::test]
 async fn stuck_running_jobs_are_requeued(pool: PgPool) {
-    let id = queue::enqueue(&pool, &Job::StaleDealScan, Utc::now()).await.unwrap().unwrap();
+    let id = queue::enqueue(&pool, &Job::StaleDealScan, Utc::now())
+        .await
+        .unwrap()
+        .unwrap();
     queue::claim_next(&pool).await.unwrap().unwrap();
     // Simulate a worker that died 20 minutes ago.
     sqlx::query("UPDATE jobs SET locked_at = now() - interval '20 minutes' WHERE id = $1")
@@ -172,7 +187,9 @@ async fn stuck_running_jobs_are_requeued(pool: PgPool) {
         .await
         .unwrap();
 
-    let requeued = queue::requeue_stuck(&pool, TimeDelta::minutes(15)).await.unwrap();
+    let requeued = queue::requeue_stuck(&pool, TimeDelta::minutes(15))
+        .await
+        .unwrap();
 
     assert_eq!(requeued, 1);
     assert_eq!(job_status(&pool, id).await, "queued");
@@ -181,10 +198,15 @@ async fn stuck_running_jobs_are_requeued(pool: PgPool) {
 
 #[sqlx::test]
 async fn recently_claimed_jobs_are_left_alone(pool: PgPool) {
-    let id = queue::enqueue(&pool, &Job::StaleDealScan, Utc::now()).await.unwrap().unwrap();
+    let id = queue::enqueue(&pool, &Job::StaleDealScan, Utc::now())
+        .await
+        .unwrap()
+        .unwrap();
     queue::claim_next(&pool).await.unwrap().unwrap();
 
-    let requeued = queue::requeue_stuck(&pool, TimeDelta::minutes(15)).await.unwrap();
+    let requeued = queue::requeue_stuck(&pool, TimeDelta::minutes(15))
+        .await
+        .unwrap();
 
     assert_eq!(requeued, 0);
     assert_eq!(job_status(&pool, id).await, "running");
@@ -214,31 +236,39 @@ async fn recently_claimed_jobs_are_left_alone(pool: PgPool) {
 ## Your Turn 3 — `POST /activities/{id}/complete`
 
 `src/activities/db.rs`, in the same style as the rest of your activities repository. The
-`RETURNING` list must match your `ActivityRow` exactly: with Lab 31's row type, `details` needs
-its override, `details AS "details: Json<ActivityKind>"`, and from Lab 35 on the row also has
-`created_by`. (The version below was verified with a row type that keeps `details` as a
-`serde_json::Value` and converts in `TryFrom`; either works.)
+`RETURNING` list must match your `ActivityRow` exactly: `details` needs its override,
+`details AS "details: Json<ActivityKind>"`, and from Lab 35 on the row also has `created_by`.
 
 ```rust
 /// Marks a follow-up as done and returns it. `NotFound` if the activity doesn't exist
 /// or isn't a follow-up. Completing an already-completed follow-up is fine (idempotent).
 #[tracing::instrument(skip(db))]
-pub async fn complete_follow_up(db: impl PgExecutor<'_>, id: ActivityId) -> Result<Activity, CrmError> {
-    sqlx::query_as!(
+pub async fn complete_follow_up(
+    db: impl PgExecutor<'_>,
+    id: ActivityId,
+) -> Result<Activity, CrmError> {
+    let row = sqlx::query_as!(
         ActivityRow,
-        "UPDATE activities SET details = jsonb_set(details, '{done}', 'true')
-         WHERE id = $1 AND kind = 'follow_up'
-         RETURNING id, subject_type, subject_id, details, summary, occurred_at, created_by",
+        r#"UPDATE activities SET details = jsonb_set(details, '{done}', 'true')
+           WHERE id = $1 AND kind = 'follow_up'
+           RETURNING id, subject_type, subject_id,
+                     details AS "details: Json<ActivityKind>", summary, occurred_at, created_by"#,
         id.0,
     )
     .fetch_optional(db)
     .await?
-    .ok_or(CrmError::NotFound { entity: "follow-up", id: id.0 })?
-    .try_into()
+    .ok_or(CrmError::NotFound {
+        entity: "follow-up",
+        id: id.0,
+    })?;
+    Ok(row.try_into()?)
 }
 
 /// Who created a follow-up (`None` if there is no follow-up with that id).
-pub async fn follow_up_owner(db: impl PgExecutor<'_>, id: ActivityId) -> Result<Option<UserId>, CrmError> {
+pub async fn follow_up_owner(
+    db: impl PgExecutor<'_>,
+    id: ActivityId,
+) -> Result<Option<UserId>, CrmError> {
     let owner = sqlx::query_scalar!(
         r#"SELECT created_by AS "created_by: UserId" FROM activities
            WHERE id = $1 AND kind = 'follow_up'"#,
@@ -250,21 +280,31 @@ pub async fn follow_up_owner(db: impl PgExecutor<'_>, id: ActivityId) -> Result<
 }
 ```
 
-`src/http/activities.rs`:
+`src/http/activities.rs` (new imports: `axum::routing::post`, `super::extract::AppPath`,
+`crate::activities::ActivityId`, `crate::auth::policy::{self, Action}`, `crate::errors::CrmError`):
 
 ```rust
 // routes():
-.route("/activities/{id}/complete", post(complete_follow_up))
+Router::new()
+    .route("/activities", get(list_activities).post(log_activity))
+    .route("/activities/{id}/complete", post(complete_follow_up))
+```
 
+```rust
 /// POST /activities/{id}/complete: the follow-up's owner (or a manager/admin) marks it done.
 #[tracing::instrument(skip(state, user))]
 async fn complete_follow_up(
     user: AuthUser,
     State(state): State<AppState>,
-    Path(id): Path<i64>,
-) -> Result<Json<Activity>, ApiError> {
+    AppPath(id): AppPath<i64>,
+) -> Result<Json<ActivityResponse>, ApiError> {
     let id = ActivityId(id);
-    let not_found = || ApiError::from(CrmError::NotFound { entity: "follow-up", id: id.0 });
+    let not_found = || {
+        ApiError::from(CrmError::NotFound {
+            entity: "follow-up",
+            id: id.0,
+        })
+    };
 
     let owner = activities::db::follow_up_owner(&state.pool, id)
         .await?
@@ -276,19 +316,21 @@ async fn complete_follow_up(
 
     let activity = activities::db::complete_follow_up(&state.pool, id).await?;
     tracing::info!("follow-up completed");
-    Ok(Json(activity))
+    Ok(Json(ActivityResponse::from(&activity)))
 }
 ```
 
-(If your activities handlers return an `ActivityResponse` DTO rather than `Activity`, return
-that. The tests below only look at `kind.done`.)
+It returns the same `ActivityResponse` DTO as `log_activity` and `list_activities`. The tests
+below only look at `kind.done`.
 
 `tests/api/follow_ups.rs` (add `mod follow_ups;` to `tests/api/main.rs`). It uses the Lab
-35/36 helpers; if yours are named differently (`post_json` instead of `json_request`, for
-example), adapt the calls:
+35/36 helpers from `tests/api/helpers.rs`: `post_json` for a JSON body and `post` for a POST
+without one:
 
 ```rust
-use crate::helpers::{app, create_deal, json_request, login_as, register_and_login, send_authed};
+use crate::helpers::{
+    app, create_deal, login_as, post, post_json, register_and_login, send_authed,
+};
 use axum::http::StatusCode;
 use rust_crm::users::Role;
 use serde_json::json;
@@ -300,8 +342,7 @@ async fn create_follow_up(app: &axum::Router, token: &str) -> i64 {
     let (status, body) = send_authed(
         app,
         token,
-        json_request(
-            "POST",
+        post_json(
             "/activities",
             json!({
                 "subject": format!("deal:{deal_id}"),
@@ -322,11 +363,11 @@ async fn owner_can_complete_a_follow_up_twice(pool: PgPool) {
     let id = create_follow_up(&app, &rep).await;
     let uri = format!("/activities/{id}/complete");
 
-    let (status, body) = send_authed(&app, &rep, json_request("POST", &uri, json!({}))).await;
+    let (status, body) = send_authed(&app, &rep, post(&uri)).await;
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(body["kind"]["done"], true);
 
-    let (status, _) = send_authed(&app, &rep, json_request("POST", &uri, json!({}))).await;
+    let (status, _) = send_authed(&app, &rep, post(&uri)).await;
     assert_eq!(status, StatusCode::OK, "completing twice is fine");
 }
 
@@ -339,10 +380,10 @@ async fn another_rep_gets_404_but_a_manager_can_complete(pool: PgPool) {
     let id = create_follow_up(&app, &owner).await;
     let uri = format!("/activities/{id}/complete");
 
-    let (status, _) = send_authed(&app, &other, json_request("POST", &uri, json!({}))).await;
+    let (status, _) = send_authed(&app, &other, post(&uri)).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
 
-    let (status, _) = send_authed(&app, &manager, json_request("POST", &uri, json!({}))).await;
+    let (status, _) = send_authed(&app, &manager, post(&uri)).await;
     assert_eq!(status, StatusCode::OK);
 }
 
@@ -354,20 +395,22 @@ async fn completing_something_that_is_not_a_follow_up_is_404(pool: PgPool) {
     let (_, call) = send_authed(
         &app,
         &rep,
-        json_request(
-            "POST",
+        post_json(
             "/activities",
-            json!({ "subject": format!("deal:{deal_id}"), "kind": { "type": "call", "minutes": 5 }, "summary": "Quick call" }),
+            json!({
+                "subject": format!("deal:{deal_id}"),
+                "kind": { "type": "call", "minutes": 5 },
+                "summary": "Quick call",
+            }),
         ),
     )
     .await;
     let uri = format!("/activities/{}/complete", call["id"]);
 
-    let (status, _) = send_authed(&app, &rep, json_request("POST", &uri, json!({}))).await;
+    let (status, _) = send_authed(&app, &rep, post(&uri)).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
 
-    let (status, _) =
-        send_authed(&app, &rep, json_request("POST", "/activities/999999/complete", json!({}))).await;
+    let (status, _) = send_authed(&app, &rep, post("/activities/999999/complete")).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
 }
 ```
@@ -406,8 +449,13 @@ async fn concurrent_workers_never_claim_the_same_job(pool: PgPool) {
     const WORKERS: usize = 8;
 
     for i in 0..JOBS {
-        let job = Job::SendReminder { activity_id: rust_crm::activities::ActivityId(i) };
-        queue::enqueue(&pool, &job, Utc::now()).await.unwrap().unwrap();
+        let job = Job::SendReminder {
+            activity_id: rust_crm::activities::ActivityId(i),
+        };
+        queue::enqueue(&pool, &job, Utc::now())
+            .await
+            .unwrap()
+            .unwrap();
     }
 
     let mut workers = Vec::new();
@@ -458,12 +506,21 @@ every run failed with between 71 and 88 claims for 50 jobs.
 
 ## The three extra tests from Step 13
 
+`jobs_scheduled_in_the_future_are_not_claimed_yet` needs `TimeDelta`: change the `chrono`
+import in `tests/jobs.rs` to `use chrono::{TimeDelta, Utc};`.
+
 ```rust
 #[sqlx::test]
 async fn a_claimed_job_is_not_claimed_again(pool: PgPool) {
-    let id = queue::enqueue(&pool, &Job::StaleDealScan, Utc::now()).await.unwrap().unwrap();
+    let id = queue::enqueue(&pool, &Job::StaleDealScan, Utc::now())
+        .await
+        .unwrap()
+        .unwrap();
 
-    let claimed = queue::claim_next(&pool).await.unwrap().expect("a job to claim");
+    let claimed = queue::claim_next(&pool)
+        .await
+        .unwrap()
+        .expect("a job to claim");
     assert_eq!(claimed.id, id);
     assert_eq!(claimed.job, Job::StaleDealScan);
     assert_eq!(claimed.attempts, 1);
@@ -474,7 +531,9 @@ async fn a_claimed_job_is_not_claimed_again(pool: PgPool) {
 
 #[sqlx::test]
 async fn jobs_scheduled_in_the_future_are_not_claimed_yet(pool: PgPool) {
-    queue::enqueue(&pool, &Job::StaleDealScan, Utc::now() + TimeDelta::hours(1)).await.unwrap();
+    queue::enqueue(&pool, &Job::StaleDealScan, Utc::now() + TimeDelta::hours(1))
+        .await
+        .unwrap();
     assert!(queue::claim_next(&pool).await.unwrap().is_none());
 }
 
@@ -492,7 +551,9 @@ async fn deals_with_recent_activity_are_not_stale(pool: PgPool) {
     .await
     .unwrap();
 
-    let report = handlers::stale_deal_scan(&pool, 14, Utc::now()).await.unwrap();
+    let report = handlers::stale_deal_scan(&pool, 14, Utc::now())
+        .await
+        .unwrap();
 
     assert_eq!(report.follow_ups_created, 0);
 }
@@ -521,9 +582,9 @@ fn stale_deal_scan_key_is_per_day() {
 ## Experiment answers
 
 **Experiment 1 (retries).** Attempt 1 runs immediately; attempt 2 about **20 s** later
-(`backoff(1)`); attempt 3 would be **40 s** after that. If you stop the server while job 4
+(`backoff(1)`); attempt 3 would be **40 s** after that. If you stop the server while job 5
 waits and start it again later, nothing is lost: in the verification run the restarted worker
-picked it up as `process{job_id=4 kind="send_reminder" attempt=3}` and, with the mailer
+picked it up as `process{job_id=5 kind="send_reminder" attempt=3}` and, with the mailer
 reverted, logged `job done`. If you restart *before* `run_at`, the job simply waits until then.
 
 **Experiment 2 (no `SKIP LOCKED`).** With no lock clause, both workers' subqueries read the

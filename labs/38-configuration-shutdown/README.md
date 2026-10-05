@@ -42,10 +42,10 @@ rust-crm/
 ```
 
 Look at how your CRM is configured today. `main.rs` reads `DATABASE_URL` and `JWT_SECRET`;
-`telemetry.rs` reads `LOG_FORMAT`; the port is hard-coded to 3000; the token lifetime is a
-`const` in `jwt.rs`; `max_connections(5)` is buried in `database/mod.rs`. Each was a reasonable
-decision when it was made. Together they're a problem, and Lab 40 (Docker + deployment) will
-need to change most of them **without recompiling**.
+`telemetry.rs` reads `LOG_FORMAT`; the port is `PORT` or a hard-coded 3000; the token
+lifetime is a `const` in `jwt.rs`; `max_connections(5)` is buried in `database/mod.rs`. Each
+was a reasonable decision when it was made. Together they're a problem, and Lab 40 (Docker +
+deployment) will need to change most of them **without recompiling**.
 
 And when you stop the server today, it just dies: whatever requests were in flight get their
 connections cut. That's about to matter, because a container platform stops your app every time
@@ -251,12 +251,12 @@ removes all doubt.
 
 ```text
 error[E0255]: the name `Environment` is defined multiple times
-  --> src/config/mod.rs:63:1
+  --> src/config/mod.rs:51:1
    |
  6 | use ::config::{Config, ConfigError, Environment, File};
    |                                     ----------- previous import of the type `Environment` here
 ...
-63 | pub enum Environment {
+51 | pub enum Environment {
    | ^^^^^^^^^^^^^^^^^^^^ `Environment` redefined here
    |
    = note: `Environment` must be defined only once in the type namespace of this module
@@ -341,9 +341,9 @@ mod set_var_demo {
 
 ```text
 error[E0133]: call to unsafe function `set_var` is unsafe and requires unsafe block
-   --> src/config/mod.rs:291:9
+   --> src/config/mod.rs:121:9
     |
-291 |         std::env::set_var("APP__SERVER__PORT", "9000");
+121 |         std::env::set_var("APP__SERVER__PORT", "9000");
     |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ call to unsafe function
     |
     = note: consult the function's documentation for information on how to avoid undefined behavior
@@ -448,10 +448,16 @@ Two subtleties:
 mod tests {
     use super::*;
 
-    const SECRET: (&str, &str) = ("APP__AUTH__JWT_SECRET", "test-secret-that-is-at-least-32-bytes!");
+    const SECRET: (&str, &str) = (
+        "APP__AUTH__JWT_SECRET",
+        "test-secret-that-is-at-least-32-bytes!",
+    );
 
     fn load_with(pairs: &[(&str, &str)]) -> Result<Settings, ConfigError> {
-        let vars = pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
+        let vars = pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
         load_from(Path::new("config"), vars)
     }
 
@@ -465,7 +471,12 @@ mod tests {
 
     #[test]
     fn production_file_overrides_defaults() {
-        let s = load_with(&[("APP_ENV", "production"), SECRET, ("APP__DATABASE__URL", "postgres://x@db/crm")]).unwrap();
+        let s = load_with(&[
+            ("APP_ENV", "production"),
+            SECRET,
+            ("APP__DATABASE__URL", "postgres://x@db/crm"),
+        ])
+        .unwrap();
         assert_eq!(s.server.port, 8080);
         assert_eq!(s.server.host, "0.0.0.0");
         assert_eq!(s.app.log_format, LogFormat::Json);
@@ -473,7 +484,12 @@ mod tests {
 
     #[test]
     fn env_vars_override_files() {
-        let s = load_with(&[SECRET, ("APP__SERVER__PORT", "9000"), ("APP__DATABASE__RUN_MIGRATIONS", "false")]).unwrap();
+        let s = load_with(&[
+            SECRET,
+            ("APP__SERVER__PORT", "9000"),
+            ("APP__DATABASE__RUN_MIGRATIONS", "false"),
+        ])
+        .unwrap();
         assert_eq!(s.server.port, 9000);
         assert!(!s.database.run_migrations);
     }
@@ -579,7 +595,8 @@ secret's bytes.
 > type wherever it's constructed. `validate()` is about *reporting*: it puts the problem in the
 > same list as every other configuration mistake, before anything starts.
 
-Commit this milestone once Step 9 compiles (you'll need `main.rs` updated first).
+Commit this milestone once the crate compiles again: you'll need Step 9's `main.rs`, and Step
+10's `src/shutdown.rs` (Step 9's `run` already calls it).
 
 ## Step 9 — One place that builds the app: `Application`
 
@@ -715,7 +732,7 @@ only validates the URL; connections are opened on first use. Combined with `run_
 > 🟢 **FOLLOW ALONG**: register the module and add the top-level `run` in `src/lib.rs`:
 
 ```rust
-pub mod shutdown;   // you'll write it in Step 10
+pub mod shutdown; // you'll write it in Step 10
 mod startup;
 
 pub use startup::Application;
@@ -884,12 +901,13 @@ The in-flight request finished (4 seconds *after* the signal); the new one was r
 > and repeat. What does the first `curl` get?
 
 ```text
- 000
-curl exit=52
+ 000 after 1.032444s
+new request: curl exit=7
 ```
 
-`52` is "empty reply from server": `SIGTERM`'s default action killed the process instantly,
-mid-request, with no log line at all. That's what every deploy did to your users until now.
+`000` means no HTTP response at all, after ~1 s instead of 5: the first `curl` itself exits
+with code `52`, "empty reply from server" (add `; echo $?` after it to see). `SIGTERM`'s default
+action killed the process instantly, mid-request, with no log line at all. That's what every deploy did to your users until now.
 Restore the line and remove the `sleep` from `/health`.
 
 ## Step 11 — Start the real server in a test
@@ -915,7 +933,10 @@ fn test_settings() -> config::Settings {
     let vars: HashMap<String, String> = [
         ("APP__SERVER__PORT", "0"),
         ("APP__DATABASE__RUN_MIGRATIONS", "false"),
-        ("APP__AUTH__JWT_SECRET", "test-secret-that-is-at-least-32-bytes!"),
+        (
+            "APP__AUTH__JWT_SECRET",
+            "test-secret-that-is-at-least-32-bytes!",
+        ),
     ]
     .into_iter()
     .map(|(k, v)| (k.to_string(), v.to_string()))
@@ -927,7 +948,9 @@ fn test_settings() -> config::Settings {
 
 #[tokio::test]
 async fn health_check_works_against_the_real_server() {
-    let app = Application::build(&test_settings()).await.expect("app should build");
+    let app = Application::build(&test_settings())
+        .await
+        .expect("app should build");
     let port = app.port();
     let (tx, rx) = tokio::sync::oneshot::channel::<()>();
     let server = tokio::spawn(app.run_until_stopped(async {
@@ -1182,12 +1205,12 @@ Then verify: `cargo fmt --check && cargo clippy --all-targets -- -D warnings && 
 
 ## Git Commit
 
-Two commits: one after Step 9 (configuration works), one at the end.
+Two commits: one once Steps 9–10 compile (configuration works), one at the end.
 
 ```bash
 git add .
 git commit -m "Add layered configuration"
-# ... Steps 10–11 and Your Turns ...
+# ... Step 11 and Your Turns ...
 git add .
 git commit -m "Add graceful shutdown"
 git tag lab-38

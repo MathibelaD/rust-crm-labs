@@ -262,7 +262,7 @@ pub async fn company_timeline(db: impl PgExecutor<'_>, company: CompanyId, q: &T
                      data: serde_json::Value }
 #[derive(Serialize)] pub struct TimelinePage { items: Vec<TimelineItem>, next_cursor: Option<String> }
 
-#[instrument(skip(state, params), fields(company_id = %id, user_id = %user.id, limit, items))]
+#[instrument(skip(state, params), fields(company_id = %id, user_id = user.id.0, limit, items))]
 pub async fn get_timeline(State(state): State<AppState>, user: AuthUser, AppPath(id): AppPath<i64>,
                           AppQuery(params): AppQuery<TimelineParams>) -> Result<Json<TimelinePage>, ApiError>;
 ```
