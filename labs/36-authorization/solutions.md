@@ -94,16 +94,15 @@ pub async fn set_owner(
 ```
 
 ```rust
-// src/http/deals.rs
+// src/http/deals.rs (AppJson, AppPath, CrmError and AuthUser are already imported)
 use super::error::FieldError;
-use super::extract::AppJson;
 use crate::users::{self, UserId};
-use axum::routing::put;
+use axum::routing::{get, post, put}; // was {get, post}
 
 // in routes():
 //     .route("/deals/{id}/owner", put(reassign_deal))
 
-#[derive(Deserialize)]
+#[derive(Debug, Deserialize)]
 pub struct ReassignDealRequest {
     pub owner_id: i64,
 }
@@ -111,7 +110,7 @@ pub struct ReassignDealRequest {
 async fn reassign_deal(
     user: AuthUser,
     State(state): State<AppState>,
-    Path(id): Path<i64>,
+    AppPath(id): AppPath<i64>,
     AppJson(req): AppJson<ReassignDealRequest>,
 ) -> Result<Json<DealResponse>, ApiError> {
     let deal = load_deal_for(&state, &user, DealId(id), Action::ReassignDeal).await?;
@@ -120,10 +119,10 @@ async fn reassign_deal(
     match users::db::get(&state.pool, new_owner).await {
         Ok(_) => {}
         Err(CrmError::NotFound { .. }) => {
-            return Err(ApiError::Validation(vec![FieldError::new(
-                "owner_id",
-                format!("user {} does not exist", req.owner_id),
-            )]));
+            return Err(ApiError::Validation(vec![FieldError {
+                field: "owner_id",
+                message: format!("user {} does not exist", req.owner_id),
+            }]));
         }
         Err(e) => return Err(e.into()),
     }
@@ -192,7 +191,7 @@ list (as a 500) instead of silently disappearing from it. The turbofish is neede
 ```rust
 // src/http/admin.rs
 use super::auth::UserResponse;
-use super::extract::AppJson;
+use super::extract::{AppJson, AppPath};
 use super::{ApiError, AppState};
 use crate::auth::AuthUser;
 use crate::auth::policy::{Action, authorize};
@@ -200,7 +199,7 @@ use crate::errors::CrmError;
 use crate::users::{self, Role, UserId};
 use axum::{
     Json, Router,
-    extract::{Path, State},
+    extract::State,
     routing::{get, put},
 };
 use serde::Deserialize;
@@ -228,7 +227,7 @@ async fn list_users(
 async fn change_role(
     user: AuthUser,
     State(state): State<AppState>,
-    Path(id): Path<i64>,
+    AppPath(id): AppPath<i64>,
     AppJson(req): AppJson<ChangeRoleRequest>,
 ) -> Result<Json<UserResponse>, ApiError> {
     authorize(&user, Action::ManageUsers, None)?;
@@ -581,8 +580,9 @@ async fn unauthenticated_admin_request_is_401_not_403(pool: PgPool) {
 
 **Notes**
 
-- These 17 tests (plus Labs 34–35's) ran green against a real Postgres while this lab was
-  written: `test result: ok. 27 passed` for the whole `tests/api` suite of that verification project.
+- These 17 tests ran green against a real Postgres on top of the Lab 33 suite, with Labs 34–35
+  applied: `test result: ok. 44 passed` for the whole `tests/api` suite (Labs 29–35's tests, these 17,
+  and the two Your Turn 5 tests below).
 - **`stage` / `reassign` request builders** keep each test focused on *who* does *what*. If you
   find yourself repeating a request shape three times, give it a name. (`get`, `delete`,
   `post_json`, `put_json` and `error_code` are your Lab 29 helpers.)
@@ -595,32 +595,24 @@ async fn unauthenticated_admin_request_is_401_not_403(pool: PgPool) {
 
 ---
 
-## Your Turn 5 — closing the side doors (sketch)
+## Your Turn 5 — closing the side doors
 
-The shapes of `/search`, `/history`, `/activities` and `/notes` come from your Labs 29–32, so
-here is the pattern rather than a drop-in.
-
-**Search: in SQL, like `GET /deals`.** Add the nullable owner filter to the deals part of the query:
-
-```sql
-SELECT id, title, ... FROM deals
-WHERE title ILIKE '%' || $1 || '%'
-  AND ($3::BIGINT IS NULL OR owner_id = $3)
-ORDER BY ... LIMIT $2
-```
-
-The handler computes the owner exactly like `list_deals` (`None` if `ViewAllDeals`, else
-`Some(user.id)`) and passes it down. Extract that into a function so the decision lives in one place:
+**Two helpers next to `load_deal_for`** in `src/http/deals.rs`, so the decision lives in one place:
 
 ```rust
-fn deal_scope(user: &AuthUser) -> Option<UserId> {
-    if policy::can(user, Action::ViewAllDeals, None) { None } else { Some(user.id) }
+use crate::subject::Subject;
+
+/// The deals a list may return for `user`: everyone's, or only their own.
+pub(crate) fn deal_scope(user: &AuthUser) -> DealFilter {
+    DealFilter {
+        owner: if policy::can(user, Action::ViewAllDeals, None) {
+            None
+        } else {
+            Some(user.id)
+        },
+    }
 }
-```
 
-**Subject-based endpoints: in Rust, like `GET /deals/{id}`.**
-
-```rust
 /// 404 if the subject is a deal the caller may not view. Companies and contacts are shared.
 pub(crate) async fn ensure_subject_visible(
     state: &AppState,
@@ -637,19 +629,124 @@ pub(crate) async fn ensure_subject_visible(
 }
 ```
 
-Call it first in `GET /history`, `GET /activities`, `GET /notes`, and in `POST /activities` /
-`POST /notes` before inserting. (`load_deal_for` must be `pub(crate)` for the other modules to
-use it, or move both helpers to a small `http::access` module.) The exhaustive `match` on
-`Subject` means that when someone adds `Subject::Lead`, they're forced to decide whether leads are shared.
+`list_deals` becomes `let filter = deal_scope(&user);`, and `load_deal_for` must be `pub(crate)`.
+The exhaustive `match` on `Subject` means that when someone adds `Subject::Lead`, they're forced
+to decide whether leads are shared.
 
-**History of a company** includes items from its deals in some designs. If yours does, a rep
-viewing a company's history would see activity on colleagues' deals. Filter those in the SQL
-(`subject_type <> 'deal' OR subject_id IN (SELECT id FROM deals WHERE owner_id = $n)`) or decide
-explicitly that company-level history is shared, and write the decision down.
+**Search: in SQL, like `GET /deals`.** `deals::db::search` takes the same filter:
 
-**Pipeline**: an org-wide total by stage reveals no individual deal. Many teams consider it fine
-for reps, others don't (it reveals company revenue). If you restrict it, `deals::db::pipeline`
-gets the same `owner` filter as `list`.
+```rust
+pub async fn search(
+    db: impl PgExecutor<'_>,
+    term: &str,
+    limit: i64,
+    filter: &DealFilter,
+) -> Result<Vec<Deal>, CrmError> {
+    let rows = sqlx::query_as!(
+        DealRow,
+        "SELECT id, company_id, title, value_cents, stage, owner_id
+         FROM deals
+         WHERE title ILIKE '%' || $1 || '%'
+           AND ($3::BIGINT IS NULL OR owner_id = $3)
+         ORDER BY similarity(title, $1) DESC, id
+         LIMIT $2",
+        term,
+        limit,
+        filter.owner.map(|owner| owner.0),
+    )
+    // ... unchanged ...
+}
+```
+
+and the `search` handler takes `user: AuthUser`, computes `let scope = deal_scope(&user);` before
+the `try_join!`, and passes `&scope` to `deals::db::search`.
+
+**Subject-based endpoints: in Rust, like `GET /deals/{id}`.** In `list_activities`,
+`list_notes` and `history`, add `user: AuthUser` and call
+`ensure_subject_visible(&state, &user, subject).await?;` right after `let subject = q.parse()?;`.
+In `create_activity` and `create_note`, parse the subject first, check it, then build the
+`New*` value with it:
+
+```rust
+let subject = parse_subject(&req.subject)?;
+ensure_subject_visible(&state, &user, subject).await?;
+let new = NewNote { subject, body: req.body };
+```
+
+**Tests** (in `tests/api/authz.rs`; verified):
+
+```rust
+#[sqlx::test]
+async fn search_only_returns_visible_deals(pool: PgPool) {
+    let app = app(pool.clone());
+    let alice = login_as(&app, &pool, "alice@example.com", Role::SalesRep).await;
+    let bob = login_as(&app, &pool, "bob@example.com", Role::SalesRep).await;
+    let mine = create_deal(&app, &alice).await;
+    create_deal(&app, &bob).await;
+
+    let (status, body) = send_authed(&app, &alice, get("/search?q=Big")).await;
+    assert_eq!(status, StatusCode::OK);
+    let ids: Vec<i64> = body["deals"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|d| d["id"].as_i64().unwrap())
+        .collect();
+    assert_eq!(ids, [mine]);
+}
+
+#[sqlx::test]
+async fn subject_endpoints_hide_other_reps_deals(pool: PgPool) {
+    let app = app(pool.clone());
+    let alice = login_as(&app, &pool, "alice@example.com", Role::SalesRep).await;
+    let bob = login_as(&app, &pool, "bob@example.com", Role::SalesRep).await;
+    let deal = create_deal(&app, &alice).await;
+    let subject = format!("deal:{deal}");
+
+    for uri in [
+        format!("/history?subject={subject}"),
+        format!("/activities?subject={subject}"),
+        format!("/notes?subject={subject}"),
+    ] {
+        assert_eq!(send_authed(&app, &bob, get(&uri)).await.0, StatusCode::NOT_FOUND, "{uri}");
+        assert_eq!(send_authed(&app, &alice, get(&uri)).await.0, StatusCode::OK, "{uri}");
+    }
+    let note = json!({ "subject": subject, "body": "psst" });
+    assert_eq!(
+        send_authed(&app, &bob, post_json("/notes", note)).await.0,
+        StatusCode::NOT_FOUND
+    );
+    let call = json!({ "subject": subject, "kind": { "type": "call", "minutes": 5 }, "summary": "hi" });
+    assert_eq!(
+        send_authed(&app, &bob, post_json("/activities", call)).await.0,
+        StatusCode::NOT_FOUND
+    );
+}
+```
+
+The two Lab 33 activity tests that change (see the Your Turn 5 checklist):
+
+```rust
+// keyset_pages_walk_the_whole_history_once
+// Lab 36: deal 1 belongs to the fixture user, so only a manager (or its owner) sees it.
+let app = app(pool.clone());
+let token = login_as(&app, &pool, "meg@example.com", Role::Manager).await;
+
+// a_tampered_cursor_is_rejected
+// Lab 36: a deal subject is now looked up (404) before the cursor is read; companies aren't.
+get("/activities?subject=company:1&cursor=bm9wZQ")
+```
+
+**History of a company** in this course's `/history` only covers items whose subject *is* that
+company (Lab 32), so it doesn't show activity on the company's deals. If you extended it to do
+so, a rep viewing a company's history would see activity on colleagues' deals: filter those in
+the SQL (`subject_type <> 'deal' OR subject_id IN (SELECT id FROM deals WHERE owner_id = $n)`)
+or decide explicitly that company-level history is shared, and write the decision down.
+
+**Pipeline and company overview**: `GET /pipeline` (totals per stage) and the `open_deal_count`
+in `GET /companies/overview` reveal no individual deal. Many teams consider that fine for reps,
+others don't (it reveals company revenue). If you restrict them, `deals::db::pipeline` and the
+overview's deal sub-query get the same `owner` filter as `list`.
 
 ---
 

@@ -27,31 +27,43 @@ pub struct NewContact {
 `src/crm.rs`:
 
 ```rust
+/// Adds a contact. The email must be unused and the company (if any) must exist.
 pub fn add_contact(&mut self, new: NewContact) -> Result<ContactId, CrmError> {
     if let Some(company_id) = new.company_id {
-        self.require_company(company_id)?;   // or your own "company exists" check
+        self.company(company_id)?;
     }
     if self.contacts.email_exists(&new.email) {
         return Err(CrmError::DuplicateEmail(new.email.as_str().to_string()));
     }
-    let id = self.contacts.next_id();
-    let NewContact { name, email, phone, company_id } = new;
-    Ok(self.contacts.insert(Contact { id, name, email, phone, company_id }))
+    let NewContact {
+        name,
+        email,
+        phone,
+        company_id,
+    } = new;
+    let contact = Contact::new(self.contacts.next_id(), name, email, phone, company_id);
+    contact.validate()?;
+    Ok(self.contacts.insert(contact))
 }
 ```
 
+Only the signature and the field accesses changed. The body is your Lab 14/15 version.
+
 **Why destructure with `let NewContact { .. } = new;`?** It moves each field out of `new` into
-its own variable in one statement, and the `Contact { id, name, email, phone, company_id }`
-literal then uses field-init shorthand. If someone later adds a field to `NewContact`, the
-destructuring pattern stops compiling (it has no `..`), which reminds you to carry the new field
-into `Contact`.
+its own variable in one statement, ready to hand to `Contact::new`. If someone later adds a field to `NewContact`, the destructuring pattern stops
+compiling (it has no `..`), which reminds you to carry the new field into `Contact`.
 
-**Why are the checks before `next_id()`?** If a check fails, we haven't consumed an id. It's not
-a correctness bug either way (ids only need to be unique), but "validate first, mutate second"
-is the same rule Lab 18 used for `move_to`.
+**Why keep `contact.validate()?`** The HTTP boundary now checks name, email and phone first, but
+the CLI and the tests build `NewContact` directly. The domain still guards its own invariants
+(Lab 15), so a blank name can't sneak in through a path that skips `TryFrom`.
 
-Call sites the compiler showed you: the CLI's contact-add command and `tests/common/mod.rs`.
-In the tests, a tiny helper keeps `sample_crm` readable:
+Call sites the compiler showed you: the CLI's `contact add` (inside its `write_crm` closure:
+`crm.add_contact(NewContact { name, email, phone, company_id })`), the unit tests in `crm.rs`,
+`history.rs`, `stats.rs`, `contacts/queries.rs` and the round-trip test in
+`src/storage/json_file.rs`, `sample_crm` in `tests/common/mod.rs`, and
+`duplicate_contact_email_is_rejected` / `contact_for_a_missing_company_is_rejected` in
+`tests/validation.rs`. Each needs `NewContact` imported. Writing the struct literal at every call
+site works fine; if you prefer, a tiny helper keeps `sample_crm` readable:
 
 ```rust
 fn contact(name: &str, email: &str, company: CompanyId) -> NewContact {
@@ -93,19 +105,7 @@ fn validate_email(raw: &str) -> Result<Email, FieldError> {
 
 fn validate_phone(raw: Option<String>) -> Result<Option<String>, FieldError> {
     let Some(phone) = raw else { return Ok(None) };
-    let phone = phone.trim();
-    if phone.is_empty() {
-        return Ok(None);
-    }
-    let allowed = |c: char| c.is_ascii_digit() || " +-().".contains(c);
-    let digits = phone.chars().filter(char::is_ascii_digit).count();
-    if !phone.chars().all(allowed) || digits < 7 {
-        return Err(FieldError::new(
-            "phone",
-            "must contain at least 7 digits and only digits, spaces and + - ( ) .",
-        ));
-    }
-    Ok(Some(phone.to_string()))
+    parse_phone(&phone).map_err(|e| FieldError::new("phone", e.to_string()))
 }
 
 impl TryFrom<CreateContactRequest> for NewContact {
@@ -134,17 +134,19 @@ impl TryFrom<CreateContactRequest> for NewContact {
 
 Reasoning worth checking against yours:
 
-- **`validate_email` reuses `Email::try_from`.** Don't write a second email check for HTTP. The
-  domain type *is* the rule. The boundary only translates its `ValidationError` into a
-  `FieldError` with a field name attached.
+- **`validate_email` reuses `Email::try_from`, and `validate_phone` reuses `parse_phone`.** Don't
+  write a second email or phone check for HTTP. The domain *is* the rule. The boundary only
+  translates its `ValidationError` into a `FieldError` with a field name attached. (A separate
+  HTTP phone rule that, say, also allowed dots would accept `555.0100`, and then
+  `contact.validate()` would reject it with a 422 that has no `fields`: two rules drift apart.)
 - **`req.company_id.map(CompanyId)`**: a tuple-struct name is also a function
   (`fn(u64) -> CompanyId`), so it can be passed to `map` directly.
 - **Partial moves.** `validate_phone(req.phone)` moves `phone` out of `req`, but then the match
   arm still uses `req.company_id`. That compiles because Rust tracks moves *per field*: `req` is
   partially moved, and its other fields are still usable. (Try using `req` as a whole after
   that line, e.g. `dbg!(&req)`, and you'll get E0382.)
-- **`" +-().".contains(c)`**: `str::contains` accepts a `char` pattern, so this is a compact
-  "is `c` one of these characters" check.
+- **The imports**: `use crate::contacts::{Contact, ContactId, Email, NewContact, parse_phone};`
+  and `use crate::companies::CompanyId;`.
 
 Tests (bottom of `src/http/contacts.rs`):
 
@@ -164,7 +166,8 @@ mod tests {
 
     #[test]
     fn valid_request_becomes_new_contact() {
-        let new = NewContact::try_from(request(" Ada ", "ADA@Example.com", Some("+1 555 0100"))).unwrap();
+        let new =
+            NewContact::try_from(request(" Ada ", "ADA@Example.com", Some("+1 555 0100"))).unwrap();
         assert_eq!(new.name, "Ada");
         assert_eq!(new.email.as_str(), "ada@example.com");
         assert_eq!(new.phone.as_deref(), Some("+1 555 0100"));
@@ -192,32 +195,48 @@ because the standard library implements `PartialEq<[U; N]> for Vec<T>`.
 
 ## Your Turn 2 — Full CRUD for contacts
 
-### `Crm::update_contact`
+### `Crm::replace_contact`
 
 ```rust
-pub fn update_contact(
+/// Replaces every field of a contact (HTTP `PUT`). The company (if any) must
+/// exist, and no *other* contact may already have the email.
+pub fn replace_contact(
     &mut self,
     id: ContactId,
     update: NewContact,
 ) -> Result<&Contact, CrmError> {
-    if self.contacts.get(id).is_none() {
-        return Err(CrmError::NotFound { entity: "contact", id: id.0 });
-    }
+    self.contact(id)?;
     if let Some(company_id) = update.company_id {
-        self.require_company(company_id)?;
+        self.company(company_id)?;
     }
-    let taken = self.contacts.iter().any(|c| c.id != id && c.email == update.email);
+    let taken = self
+        .contacts
+        .iter()
+        .any(|c| c.id != id && c.email == update.email);
     if taken {
         return Err(CrmError::DuplicateEmail(update.email.as_str().to_string()));
     }
+    let NewContact {
+        name,
+        email,
+        phone,
+        company_id,
+    } = update;
+    let replacement = Contact::new(id, name, email, phone, company_id);
+    replacement.validate()?;
     let contact = self.contacts.get_mut(id).expect("existence checked above");
-    contact.name = update.name;
-    contact.email = update.email;
-    contact.phone = update.phone;
-    contact.company_id = update.company_id;
+    *contact = replacement;
     Ok(contact)
 }
 ```
+
+**Why a new method instead of changing `update_contact`?** Lab 14's `update_contact(id, name,
+email, phone)` takes `Option`s, where `None` means "keep": the CLI's `contact update` relies on
+that (and so do its Lab 14 tests). `PUT` means "here is the complete new contact", which is a
+different operation, so it gets its own name. Same domain rules, different shape.
+
+**Why build a `Contact` and `validate()` it before touching the stored one?** Same pattern as
+Lab 14's `update_contact`: if validation fails, the stored contact is untouched.
 
 **Why check existence first and call `get_mut` last?** The duplicate check iterates
 `self.contacts` with a shared borrow. If we took `let contact = self.contacts.get_mut(id)` at the
@@ -266,10 +285,10 @@ pub async fn get_contact(
     AppPath(id): AppPath<u64>,
 ) -> Result<Json<ContactResponse>, ApiError> {
     let crm = state.crm.read().expect("crm lock poisoned");
-    let contact = crm
-        .contacts
-        .get(ContactId(id))
-        .ok_or(CrmError::NotFound { entity: "contact", id })?;
+    let contact = crm.contacts.get(ContactId(id)).ok_or(CrmError::NotFound {
+        entity: "contact",
+        id,
+    })?;
     Ok(Json(ContactResponse::from(contact)))
 }
 
@@ -281,7 +300,7 @@ pub async fn update_contact(
     let update = NewContact::try_from(req)?;
     let response = {
         let mut crm = state.crm.write().expect("crm lock poisoned");
-        ContactResponse::from(crm.update_contact(ContactId(id), update)?)
+        ContactResponse::from(crm.replace_contact(ContactId(id), update)?)
     };
     state.persist().await?;
     Ok(Json(response))
@@ -303,10 +322,10 @@ pub async fn delete_contact(
 
 (`AppPath` is Your Turn 3. With plain `Path(id): Path<u64>` everything else is identical.)
 
-If your `remove_contact` returns `Option<Contact>` instead of a `Result`, convert at the call:
-`.remove_contact(ContactId(id)).ok_or(CrmError::NotFound { entity: "contact", id })?`.
+Your Lab 14 `remove_contact` returns `Result<Contact, CrmError>` (`NotFound` for an unknown id),
+so `?` is all it needs.
 
-**Is `ContactResponse::from(crm.update_contact(..)?)` borrow-safe?** `update_contact` returns
+**Is `ContactResponse::from(crm.replace_contact(..)?)` borrow-safe?** `replace_contact` returns
 `&Contact` borrowed from `crm` (really from the write guard). `ContactResponse::from` copies what
 it needs into owned `String`s, then the borrow ends, and the guard is dropped at the end of the
 block. Nothing borrowed escapes past the `.await`.
@@ -394,7 +413,7 @@ rather than the variant means a future "internal" path can't forget it.
    short-circuits with its `Rejection` (converted to `ApiError` by `AppJson`).
 5. `?` returns on the first error; we want every field's error in one response. Also
    `Vec<FieldError>: From<FieldError>` doesn't exist, which is the compiler noticing.
-6. So that *any* error that ends up as a 5xx, including future variants or a CLI-only
-   `CrmError` that reaches HTTP by mistake, is redacted. The rule protects a property (no
-   internals in 5xx), not one variant.
+6. So that *any* error that ends up as a 5xx, including future variants (say, a database
+   error you map to 500 in Lab 30), is redacted. The rule protects a property (no internals in
+   5xx), not one variant.
 7. So that adding a `CrmError` variant forces an explicit HTTP decision at compile time.

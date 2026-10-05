@@ -98,9 +98,9 @@ error[E0603]: module `parser` is private
   |                    ^^^^^^ private module
   |
 note: the module `parser` is defined here
- --> src/cli/mod.rs:3:1
+ --> src/cli/mod.rs:5:1
   |
-3 | mod parser;
+5 | mod parser;
   | ^^^^^^^^^^
 ```
 
@@ -313,9 +313,9 @@ cargo test --test lead_conversion
 
 ```text
 warning: constant `ACME` is never used
-  --> tests/common/mod.rs:77:11
+  --> tests/common/mod.rs:76:11
    |
-77 | pub const ACME: CompanyId = CompanyId(1);
+76 | pub const ACME: CompanyId = CompanyId(1);
    |           ^^^^
 ...
 warning: `rust-crm` (test "lead_conversion") generated 5 warnings
@@ -334,7 +334,7 @@ separately. `lead_conversion` doesn't use `ACME`, so in *that* crate it's dead c
 
 ```text
 error: constant `ACME` is never used
-  --> tests/common/mod.rs:77:11
+  --> tests/common/mod.rs:76:11
    |
    = note: `-D dead-code` implied by `-D warnings`
 ```
@@ -385,12 +385,28 @@ The tools for running a subset:
 Arguments **before** `--` go to cargo (which binaries to build and run). Arguments **after** `--`
 go to the test harness inside each binary.
 
-> 🟡 **EXPERIMENT**: predict, then run `cargo test conversion`. How many tests run? Now try
-> `cargo test convert`.
+> 🟡 **EXPERIMENT**: predict, then run `cargo test conversion`. Which tests run? Is
+> `converting_a_qualified_lead_creates_company_and_contact` among them? Now try `cargo test convert`.
 
-`cargo test conversion` runs **zero** tests: the filter matches test *names*, not file names, and
-none of the test names contain "conversion". `convert` matches the tests whose names contain it.
-To run a file, use `--test lead_conversion`.
+```text
+     Running unittests src/lib.rs (target/debug/deps/rust_crm-…)
+test leads::conversion::tests::converts_a_qualified_lead_with_a_deal ... ok
+test leads::conversion::tests::an_unqualified_lead_is_handed_back ... ok
+test leads::conversion::tests::a_lead_without_company_becomes_an_individual ... ok
+test crm::lead_tests::duplicate_email_blocks_conversion_and_keeps_the_lead ... ok
+test crm::lead_tests::invalid_deal_blocks_conversion_and_keeps_the_lead ... ok
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 116 filtered out; …
+…
+     Running tests/lead_conversion.rs (target/debug/deps/lead_conversion-…)
+running 0 tests
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; …
+```
+
+The filter matches test *names*, and a unit test's name is its **full module path**:
+`leads::conversion::tests::…` contains "conversion" because the *module* `leads/conversion.rs`
+does. The file `tests/lead_conversion.rs` is a different matter: an integration test's name has no
+file name in it, so `converting_a_qualified_lead_creates_company_and_contact` doesn't match.
+`convert` matches it (and a few unit tests). To run one file, use `--test lead_conversion`.
 
 > 🟡 **EXPERIMENT**: add `println!("company = {company:?}");` to the test, then run it with and
 > without `-- --nocapture`. By default the harness *captures* output and only shows it for
@@ -400,46 +416,66 @@ To run a file, use `--test lead_conversion`.
 
 ## Step 6 — Doc tests: examples that can't go stale
 
-Since Lab 13 you've had one doc test: the example on `Email::parse`. Every ```` ``` ```` code block
-in a `///` comment on a public item is compiled and run by `cargo test`, **as if it were a separate
-crate using your library**, exactly like an integration test. (That's why the example starts with
+You've had doc tests for a while: the example on `Email::parse`, and the `compile_fail` examples
+from Labs 13 and 19. Every ```` ``` ```` code block in a `///` comment on a public item is compiled
+and run by `cargo test`, **as if it were a separate crate using your library**, exactly like an
+integration test. (That's why the example starts with
 `use rust_crm::...`.)
 
 Why that matters: documentation examples are the first code people copy. An example that no longer
 compiles is worse than none. Doc tests make stale examples a test failure.
 
-Doc tests can do something no other test can: prove that code **doesn't** compile.
+Doc tests can do something no other test can: prove that code **doesn't** compile. You wrote
+two of those in Lab 13's Your Turn.
 
-> 🟢 **FOLLOW ALONG**: in `src/contacts/email.rs`, on the struct
+> 🟢 **FOLLOW ALONG**: open `src/contacts/email.rs` and read the doc comment on the struct
 
 ```rust
-/// A validated, lower-cased email address.
+/// An email address that has passed validation.
 ///
-/// The only way to get one is through [`Email::parse`] (or `TryFrom`), so
-/// holding an `Email` proves it passed validation. The field is private:
+/// The field is private, so the only way to get an `Email` is through
+/// [`Email::parse`]. If you hold an `Email`, it is valid: trimmed,
+/// lowercase, with exactly one `@` and a dot in the domain.
+///
+/// Code outside the `customers` module cannot build one directly:
 ///
 /// ```compile_fail
 /// use rust_crm::contacts::Email;
 ///
-/// let unchecked = Email(String::from("not an email"));
+/// let email = Email(String::from("definitely not an email"));
 /// ```
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+///
+/// ...and cannot reach inside one to change it:
+///
+/// ```compile_fail
+/// use rust_crm::contacts::Email;
+///
+/// let mut email = Email::parse("ada@example.com").unwrap();
+/// email.0.push_str(" oops");
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(try_from = "String", into = "String")]
 pub struct Email(String);
 ```
+
+(Your wording may differ. The comment still says `customers`: Lab 14 renamed that module to
+`contacts`. Stale prose is exactly what doc tests *can't* catch; only the code blocks are
+checked. Fix the word while you're here.)
 
 ```bash
 cargo test --doc
 ```
 
 ```text
-test src/contacts/email.rs - contacts::email::Email::parse (line 24) ... ok
+test src/contacts/email.rs - contacts::email::Email::parse (line 36) ... ok
 test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
-test src/contacts/email.rs - contacts::email::Email (line 12) - compile fail ... ok
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.06s
+test src/contacts/email.rs - contacts::email::Email (line 23) - compile fail ... ok
+test src/leads/conversion.rs - leads::conversion::Lead::convert (line 66) - compile fail ... ok
+test src/contacts/email.rs - contacts::email::Email (line 15) - compile fail ... ok
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.06s
 ```
 
-The `compile_fail` test **passes because the code fails to compile**. If someone ever makes
+A `compile_fail` test **passes because the code fails to compile**. If someone ever makes
 `Email`'s field `pub`, this test fails, and the invariant from Labs 12–13 ("an `Email` is always
 valid") is protected by the test suite instead of by memory. (A `compile_fail` test passes for
 *any* compile error, typos included. Keep these examples tiny and check them by hand once.)
@@ -478,7 +514,7 @@ cargo test --release --test overflow
 test adding_past_i64_max_panics - should panic ... ok
 ...
 test adding_past_i64_max_panics - should panic ... FAILED
-note: test did not panic as expected at tests/overflow.rs:4:4
+note: test did not panic as expected at tests/overflow.rs:5:4
 ```
 
 (This assumes your Lab 18 `Add` impl is a plain `self.cents + rhs.cents`. If you used
@@ -521,7 +557,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Check out the code
-        uses: actions/checkout@v5
+        uses: actions/checkout@v7
 
       - name: Install Rust (stable)
         uses: dtolnay/rust-toolchain@stable
@@ -562,7 +598,7 @@ What each part does:
 Steps run in order and stop at the first failure. The cheap checks go first, so you hear about
 formatting in seconds, not after a full test run.
 
-> Action versions (`@v5`, `@v2`) move over time. If GitHub warns that one is deprecated, check its
+> Action versions (`@v7`, `@v2`) move over time. If GitHub warns that one is deprecated, check its
 > README for the current major version.
 
 ### Run the same checks locally first
@@ -573,11 +609,10 @@ cargo fmt --all --check && cargo clippy --all-targets -- -D warnings && cargo te
 
 Fix anything it reports **before** pushing. Code from earlier labs that you never ran Clippy on
 with `--all-targets -D warnings` may produce a few findings. Read each one: Clippy explains why,
-and links to the lint's documentation. If one is a deliberate design decision (for example
-`result_large_err` on Lab 19's `Lead::convert`, whose error carries the whole `Lead` back on
-purpose), allow it **on that one item** with a comment, e.g.
-`#[allow(clippy::result_large_err)] // ConvertError hands the Lead back by design`, never
-crate-wide.
+and links to the lint's documentation. If one is a deliberate design decision, allow it **on that
+one item** with a reason, never crate-wide. You've seen the pattern in Lab 19: `Lead::convert`
+carries `#[expect(clippy::result_large_err, reason = "ConvertError carries the whole Lead back to
+the caller on purpose")]`.
 
 ### A README with a badge
 
@@ -629,7 +664,7 @@ tests you wrote in earlier labs):
 
 ```text
      Running unittests src/lib.rs (target/debug/deps/rust_crm-…)
-test result: ok. 18 passed; 0 failed; …
+test result: ok. 121 passed; 0 failed; …
      Running unittests src/main.rs (target/debug/deps/rust_crm-…)
 test result: ok. 6 passed; 0 failed; …
      Running tests/lead_conversion.rs (target/debug/deps/lead_conversion-…)
@@ -642,7 +677,7 @@ test result: ok. 5 passed; 0 failed; …
 test result: ok. 8 passed; 0 failed; …
    Doc-tests rust_crm
 test result: ok. 3 passed; 0 failed; …
-test result: ok. 1 passed; 0 failed; …
+test result: ok. 3 passed; 0 failed; …
 ```
 
 On GitHub: a green ✅ next to your commit, a passing **CI / fmt, clippy, test** job, and a green
@@ -768,8 +803,9 @@ Arrange / Act / Assert. Errors are checked with `matches!`, not `assert_eq!`.
 >
 > - [ ] on the `Money` struct: an example showing `Display` (`$1,250.50`) and addition
 > - [ ] on `Money::parse`: examples for a fractional amount, a whole amount, and one rejected input
-> - [ ] on `Email::parse`: add one line showing an invalid input is rejected
-> - [ ] `cargo test --doc` shows all of them (plus Step 6's `compile_fail`) passing
+> - [ ] on `Email::parse`: check that the example also shows an invalid input being rejected
+>   (Lab 13's version already does; add the line if yours doesn't)
+> - [ ] `cargo test --doc` shows all of them (plus the `compile_fail` tests from Step 6) passing
 
 Then commit the tests (first commit below), add the workflow and README, run the local CI command,
 commit and push (second commit).

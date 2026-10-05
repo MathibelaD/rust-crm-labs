@@ -59,8 +59,8 @@ grep -rn "println!\|eprintln!" src/
 You should find at least two (your exact lines may differ):
 
 ```text
-src/main.rs:20:    println!("listening on http://127.0.0.1:3000");
-src/http/error.rs:97:                eprintln!("internal error: {e:#}");
+src/main.rs:35:    println!("Listening on http://{}", listener.local_addr()?);
+src/http/error.rs:62:            eprintln!("internal error: {message}");
 ```
 
 Now picture the server handling 50 requests a second, and that `eprintln!` firing once:
@@ -301,11 +301,11 @@ async fn main() -> anyhow::Result<()> {
     let log_format = LogFormat::from_env().map_err(anyhow::Error::msg)?;
     telemetry::init(log_format);
 
-    // ... everything you already have: DATABASE_URL, JWT_SECRET, pool, migrations, state ...
+    // ... everything you already have: DATABASE_URL, JWT_SECRET, pool, migrations, state,
+    //     PORT and the TcpListener::bind(("127.0.0.1", port)) ...
 
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:3000").await?;
-    tracing::info!(address = %listener.local_addr()?, "listening");
-    axum::serve(listener, http::router(state)).await?;
+    tracing::info!(address = %listener.local_addr()?, "listening"); // was println!
+    axum::serve(listener, router(state)).await?;
     Ok(())
 }
 ```
@@ -465,7 +465,7 @@ named after the function, and records its arguments as fields.
 async fn get_deal(
     user: AuthUser,
     State(state): State<AppState>,
-    Path(id): Path<i64>,
+    AppPath(id): AppPath<i64>,
 ) -> Result<Json<DealResponse>, ApiError> {
     // unchanged
 }
@@ -480,7 +480,7 @@ pub async fn get(db: impl PgExecutor<'_>, id: DealId) -> Result<Deal, CrmError> 
 }
 ```
 
-- `skip(state, user)`: don't record those arguments. `id` (from `Path(id)`) is still recorded.
+- `skip(state, user)`: don't record those arguments. `id` (from `AppPath(id)`) is still recorded.
 - `fields(user_id = user.id.0)`: add a field computed from an argument.
 - `skip(db)`: an executor isn't interesting, and isn't `Debug` anyway.
 
@@ -620,15 +620,17 @@ caused by … You want the whole chain, on one line, as one field.
 > (`pub(crate)` because Lab 39's background worker will reuse it.) Solution:
 > [`solutions.md` → Mini-task](solutions.md#mini-task--error_chain).
 
-> 🟢 **FOLLOW ALONG**: once `error_chain` passes its tests, replace the `eprintln!` in the
-> `Internal` arm of `into_response`:
+> 🟢 **FOLLOW ALONG**: once `error_chain` passes its tests, move the logging into the
+> `Internal` arm of `into_response`. In Lab 28's version the `eprintln!` sits in the
+> `if status.is_server_error()` block below the `match`: delete that `eprintln!` line (keep the
+> block, it still swaps in the generic message), and log in the arm instead:
 
 ```rust
 ApiError::Internal(e) => {
     // The ONE place a 500 is logged: full cause chain to the log,
-    // a generic message to the client.
+    // a generic message to the client (the is_server_error block below replaces it).
     tracing::error!(error = %error_chain(e.as_ref()), "internal server error");
-    // ... build the 500 response exactly as before ...
+    (format!("{e:#}"), Vec::new())
 }
 ```
 
@@ -637,7 +639,7 @@ ApiError::Internal(e) => {
 allowed). If your `ApiError` has other arms that produce a 500 (for example a
 `Domain(CrmError::Database(_))` arm), route them through the same log line. If your
 `From<CrmError> for ApiError` already turns `CrmError::Database` into `ApiError::Internal`
-(the Lab 34 solution does), the `Internal` arm sees every database failure.
+(yours has since Lab 30), the `Internal` arm sees every database failure.
 
 Run the stop-the-database experiment again:
 

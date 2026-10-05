@@ -341,6 +341,9 @@ pub async fn list(db: impl PgExecutor<'_>, filter: &DealFilter) -> Result<Vec<De
 
 And `pub use db::DealFilter;` in `src/deals/mod.rs`.
 
+`list` has one other caller: the Lab 33 repository test `sql_pipeline_matches_the_rust_pipeline`
+in `tests/db/deals.rs`. Give it `deals::db::list(&pool, &deals::DealFilter::default())`.
+
 - **`($1::BIGINT IS NULL OR owner_id = $1)`** is a **nullable filter**: bind `NULL` and the
   condition is always true (no filter). Bind an id and it's `owner_id = id`. One static
   query, no string building. The `::BIGINT` cast tells Postgres (and SQLx's type checker) what type
@@ -359,7 +362,7 @@ And `pub use db::DealFilter;` in `src/deals/mod.rs`.
 > 🟢 **FOLLOW ALONG**: `src/http/deals.rs`: the list handler
 
 ```rust
-use crate::auth::AuthUser;
+// `AuthUser` is already imported (Lab 35's create_deal uses it). Add:
 use crate::auth::policy::{self, Action};
 use crate::deals::DealFilter;
 
@@ -421,7 +424,7 @@ A 403 is only honest when the caller already knows the record exists (because th
 > 🟢 **FOLLOW ALONG**: `src/http/deals.rs`
 
 ```rust
-use crate::errors::CrmError;
+// `CrmError` is already imported in this file (create_deal uses it since Lab 29).
 
 /// Loads a deal and checks `action` on it.
 /// - can't even see it  -> 404, exactly as if it didn't exist
@@ -456,7 +459,7 @@ Now every single-deal handler goes through it:
 async fn get_deal(
     user: AuthUser,
     State(state): State<AppState>,
-    Path(id): Path<i64>,
+    AppPath(id): AppPath<i64>,
 ) -> Result<Json<DealResponse>, ApiError> {
     let deal = load_deal_for(&state, &user, DealId(id), Action::ViewDeal).await?;
     Ok(Json(DealResponse::from(&deal)))
@@ -465,13 +468,20 @@ async fn get_deal(
 async fn move_deal(
     user: AuthUser,
     State(state): State<AppState>,
-    Path(id): Path<i64>,
+    AppPath(id): AppPath<i64>,
     AppJson(req): AppJson<MoveDealRequest>,
 ) -> Result<Json<DealResponse>, ApiError> {
-    let mut deal = load_deal_for(&state, &user, DealId(id), Action::EditDeal).await?;
-    // ... the rest of your Lab 31 stage-move code, unchanged ...
+    let deal = load_deal_for(&state, &user, DealId(id), Action::EditDeal).await?;
+    // Lab 31's optimistic move, unchanged: it re-reads the deal and only updates
+    // if nobody changed the stage in between.
+    let deal = deals::db::move_stage(&state.pool, deal.id, req.stage).await?;
+    Ok(Json(DealResponse::from(&deal)))
 }
 ```
+
+`load_deal_for` reads the deal once for the *policy*, and `move_stage` reads it again for the
+*transition*. One extra primary-key lookup buys a handler where the authorization check can't be
+skipped. (Making `load_deal_for` `pub(crate)` now saves an edit in Your Turn 5.)
 
 `create_deal` doesn't need a policy check: everyone may create deals, and they own what they
 create (Lab 35). If you have `PUT`/`DELETE /deals/{id}`, route them through `load_deal_for`
@@ -490,7 +500,7 @@ use crate::auth::policy::{Action, authorize};
 async fn delete_company(
     user: AuthUser,
     State(state): State<AppState>,
-    Path(id): Path<i64>,
+    AppPath(id): AppPath<i64>,
 ) -> Result<StatusCode, ApiError> {
     authorize(&user, Action::DeleteCompany, None)?;
     // ... your existing delete (with the HasContacts check) ...
@@ -498,6 +508,11 @@ async fn delete_company(
 ```
 
 Here **403 is right**: every user can see every company, so "you may not delete it" leaks nothing.
+
+This breaks one Lab 33 test: `company_with_contacts_cannot_be_deleted` in `tests/api/companies.rs`
+deletes as the `rep@example.com` user Lab 35 gave it, and now gets 403 instead of 409. Once you
+have `login_as` (Step 7), log in as a manager there (`login_as(&app, &pool, "meg@example.com",
+Role::Manager)`, with `app(pool.clone())`) and add a comment saying why.
 
 **Order matters:** authorize *before* touching the database. A rep's `DELETE` is refused
 without even finding out whether the company exists, so it doesn't reveal that either.
@@ -606,6 +621,18 @@ async fn rep_cannot_see_another_reps_deal(pool: PgPool) {
 
 ```bash
 cargo test --test api authz
+```
+
+---
+
+## Step 8 — Offline query data
+
+`deals::db::list` changed and Your Turns 2, 3 and 5 add more `query_as!` calls, so refresh `.sqlx/`
+once they compile, or CI's `cargo sqlx prepare --check` (Lab 33) fails:
+
+```bash
+cargo sqlx prepare -- --all-targets
+git add .sqlx
 ```
 
 ---
@@ -816,14 +843,20 @@ run before the handler's `authorize`. Authentication always comes before authori
 > you built in Labs 29–32. Find every one and apply the same rule:
 >
 > - [ ] `GET /search?q=` (Lab 32): the `deals` part of the result contains only deals the caller
->       may view (same nullable owner filter, in SQL)
+>       may view (same nullable owner filter, in SQL: `deals::db::search` gains a `&DealFilter`)
 > - [ ] `GET /history?subject=deal:N`, `GET /activities?subject=deal:N`, `GET /notes?subject=deal:N`:
 >       a rep asking about a deal they can't view gets the deal's **404**
 > - [ ] `POST /activities` / `POST /notes` with `subject: "deal:N"` for a deal the caller can't view: **404**
 >       (otherwise reps can write into colleagues' deals and find out which ids exist from the error)
 > - [ ] One API test per endpoint above
-> - [ ] Write down (a comment in `policy.rs` is fine) what you decided for `GET /pipeline`: is
->       the org-wide pipeline total sensitive for reps? There's no single right answer, but there must be a decision.
+> - [ ] Two Lab 33 tests in `tests/api/activities.rs` change, because deal subjects are now looked up
+>       before anything else: `keyset_pages_walk_the_whole_history_once` logs calls on fixture deal 1,
+>       which belongs to the fixture user, so its token must be a manager's; and
+>       `a_tampered_cursor_is_rejected` asks about `deal:1` with no fixtures, which is now a 404
+>       before the cursor is read, so point it at `company:1`. Add a comment to each saying what changed.
+> - [ ] Write down (a comment in `policy.rs` is fine) what you decided for `GET /pipeline` and the
+>       `open_deal_count` in `GET /companies/overview` (Lab 32): are org-wide deal totals sensitive for
+>       reps? There's no single right answer, but there must be a decision.
 
 ## 💡 Hint
 
@@ -833,7 +866,7 @@ run before the handler's `authorize`. Authentication always comes before authori
 
 <details><summary>Hint 2 (Your Turn 3: own-role check)</summary>
 
-`Path(id): Path<i64>` gives you the target. Compare `UserId(id) == user.id` **after**
+`AppPath(id): AppPath<i64>` (Lab 28's extractor) gives you the target. Compare `UserId(id) == user.id` **after**
 `authorize` (a manager trying to change their own role should get the 403 like any other manager
 request, not a hint about self-changes).
 

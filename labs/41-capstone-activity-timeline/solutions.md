@@ -72,9 +72,10 @@ CREATE INDEX events_company_timeline ON events (company_id, occurred_at DESC, id
 - **Deal title snapshot in `data`**: "moved *Acme renewal* to negotiation" should read the
   same in two years, even if the deal is renamed. Snapshot what the event *meant at the time*,
   and join for what must be current.
-- **No index on `activities` needed.** Lab 32's `activities (subject_type, subject_id,
-  occurred_at DESC)` already serves the activity branch. `notes` has no equivalent index yet. Add
-  `notes (subject_type, subject_id, created_at DESC)` and show the `EXPLAIN` before and after.
+- **No new index on `activities` or `notes`.** Lab 32's `activities_subject_idx
+  (subject_type, subject_id, occurred_at DESC, id DESC)` and `notes_subject_idx
+  (subject_type, subject_id, created_at DESC, id DESC)` already serve those branches (they're
+  what `history::page` uses). Only `events` needs one. Show the `EXPLAIN` for all three branches.
 
 ---
 
@@ -109,13 +110,14 @@ pub async fn record(
   pass `&mut *tx`, a **reborrow** of the connection. `tx` itself stays usable afterwards for
   `tx.commit()`.
 
-**Stage change** (`deals::service::move_stage`, or wherever Lab 31 put it):
+**Stage change** (Lab 31's `deals::db::move_stage(&PgPool, …)`, called from `move_deal` after
+Lab 36's `load_deal_for(.., Action::EditDeal)`). It becomes a transaction:
 
 ```text
+(load_deal_for(.., EditDeal) already ran: 404 if invisible, 403 if not allowed, per Lab 36)
 begin tx
-  SELECT stage, title, company_id, owner_id FROM deals WHERE id = $1 FOR UPDATE   → 404 if none
-  authorize(EditDeal, owner)                                                      → 404/403 per Lab 36
-  current.can_transition_to(next)?                                                → 409 invalid_transition
+  SELECT stage, title, company_id FROM deals WHERE id = $1 FOR UPDATE            → 404 if none
+  deal.move_to(next)?   (the Lab 18 domain rule)                                  → 409 invalid_transition
   if current == next → commit, return (no event: nothing changed)
   UPDATE deals SET stage = $2 WHERE id = $1 AND stage = $current                 → rows_affected must be 1
   events::record(&mut *tx, &NewEvent::DealStageChanged{..}, user.id, now)
@@ -127,13 +129,15 @@ explain which. Every `?` before `commit()` drops `tx`, and **`Transaction`'s `Dr
 back**. That's the whole atomicity argument, and it's RAII again.
 
 **Lead conversion**: add one `events::record(&mut *tx, &NewEvent::LeadConverted{..}, …)`
-call after the deal insert and before `commit()` in Lab 31's `convert_lead`. Nothing else changes.
+call after the deal insert and before `commit()` in Lab 31's `leads::service::convert_lead`
+(which needs the acting `UserId` passed in now). Nothing else changes.
 
 ---
 
 ## 4. Query approach
 
-One query, three branches, a shared visibility CTE. This sketch was run against Postgres 18
+One query, three branches, a shared visibility CTE: Lab 32's `history::page` (two branches,
+`UNION ALL`, `(at, item_type, id)` keyset) grown by one source and a visibility rule. This sketch was run against Postgres 18
 with ties across all sources, and paging with limits 1–4 reproduced the single-page order
 exactly:
 
@@ -181,8 +185,9 @@ LIMIT $9;          -- $9 = limit + 1
   *higher* source than the cursor at the same timestamp, it's already been served, and for a
   lower one it hasn't.
 - **Visibility is a CTE parameterised by one nullable bind (`$2`)**, derived from
-  `policy::can(user, Action::ViewAllDeals, None)`. The policy stays the single source of truth,
-  and SQL only receives "all" or "owned by X".
+  `policy::can(user, Action::ViewAllDeals, None)`, exactly like Lab 36's `list_deals` builds
+  `DealFilter { owner }`. The policy stays the single source of truth, and SQL only receives
+  "all" or "owned by X".
 - **The `OR` across subject types** can stop Postgres from using the
   `(subject_type, subject_id, occurred_at)` index as one ordered scan. On seeded data, check
   `EXPLAIN (ANALYZE, BUFFERS)`. If you see a big sort, split each source into per-subject-type
@@ -209,8 +214,11 @@ impl TimelineCursor {
 }
 ```
 
-- **Sort key = `(occurred_at, source, id)`**, unique across the merged feed. Lab 32's
-  `occurred_at|id` isn't unique once two tables are involved.
+- **Sort key = `(occurred_at, source, id)`**, unique across the merged feed. Lab 32's plain
+  `Cursor` (`at|id`) isn't unique once two tables are involved, which is why `/history` already
+  uses `HistoryPosition` (`at|item_type|id`, via `encode_history_cursor`). This is the same idea
+  with a numeric `source` and a version prefix. Generalising `HistoryPosition` instead of adding
+  a new type is equally fine.
 - **Microsecond precision** (`to_rfc3339_opts(SecondsFormat::Micros, true)`): Postgres stores
   µs. Encoding milliseconds would make distinct rows compare equal and silently skip one.
 - **A version prefix** lets you change the format later and reject stale cursors cleanly.
@@ -255,8 +263,8 @@ pub async fn company_timeline(db: impl PgExecutor<'_>, company: CompanyId, q: &T
 #[derive(Serialize)] pub struct TimelinePage { items: Vec<TimelineItem>, next_cursor: Option<String> }
 
 #[instrument(skip(state, params), fields(company_id = %id, user_id = %user.id, limit, items))]
-pub async fn get_timeline(State(state): State<AppState>, user: AuthUser, Path(id): Path<CompanyId>,
-                          Query(params): Query<TimelineParams>) -> Result<Json<TimelinePage>, ApiError>;
+pub async fn get_timeline(State(state): State<AppState>, user: AuthUser, AppPath(id): AppPath<i64>,
+                          AppQuery(params): AppQuery<TimelineParams>) -> Result<Json<TimelinePage>, ApiError>;
 ```
 
 Notes:
@@ -321,8 +329,9 @@ Notes:
 5. **Building `next_cursor` from the probe row** (the `limit + 1`th) skips that row on the next page.
 6. **Writing the event after `commit()`** (or on the pool instead of `&mut *tx`). A crash between
    the two leaves a change with no history. A test that forces a failure is the only proof.
-7. **`Query<TimelineQuery>` with typed fields** lets axum reject bad input with its own plain-text
-   `400`, one error at a time. Parse Strings, then validate.
+7. **`AppQuery<TimelineQuery>` with typed fields** rejects bad input during deserialization as
+   Lab 28's `400 bad_request`, one error at a time (plain `Query` is worse: axum's own plain-text
+   `400`). Parse Strings, then validate into `422 validation_failed` with every `FieldError`.
 8. **Leaking through `lead_converted`**: exposing `deal_id`, a deal title or a value in the
    summary for a deal the rep can't see. Also check the `summary` text, not just `data`.
 9. **Forgetting `cargo sqlx prepare`** after adding queries. CI's `--check` and the Docker build

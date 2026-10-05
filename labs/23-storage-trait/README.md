@@ -169,8 +169,9 @@ impl Storage for JsonFileStorage {
 }
 ```
 
-Then change `pub fn load` and `pub fn save` below it to plain `fn load` / `fn save`. They're now
-private helpers. Keep `write_atomically`, `tmp_path` and the tests exactly as they are. The tests
+Delete `use thiserror::Error;` from this file too (the derive moved to `mod.rs`). Then change
+`pub fn load` and `pub fn save` below it to plain `fn load` / `fn save`. They're now private
+helpers. Keep `write_atomically`, `tmp_path` and the tests exactly as they are. The tests
 are a child module, so they can still call the private functions.
 
 - **`new(path: impl Into<PathBuf>)`** accepts a `&str`, a `String`, a `PathBuf` or a `&Path`.
@@ -182,8 +183,9 @@ are a child module, so they can still call the private functions.
   a plain `load(...)` call (no receiver) resolves to the function in scope. If that reads
   confusingly to you, rename the helpers `read_file` / `write_file`.
 
-`cargo check` now complains that `cli/mod.rs` can't find `storage::load`. Good. We'll fix `cli`
-in Step 4.
+`cargo check` now complains that `cli/mod.rs` can't find `storage::load` and `storage::save`
+(E0425), and that the file for `mod memory;` doesn't exist yet (E0583). Good. You'll write
+`memory.rs` in Step 3 and fix `cli` in Step 4.
 
 ---
 
@@ -219,7 +221,7 @@ You already know one way to accept "any type that implements a trait": generics 
 use crate::storage::Storage;
 
 pub fn run<S: Storage>(storage: S) -> anyhow::Result<()> {
-    println!("Rust CRM v{}", env!("CARGO_PKG_VERSION"));
+    println!("{APP_NAME} v{}", env!("CARGO_PKG_VERSION"));
     println!("Type 'help' for a list of commands.");
 
     let mut crm = storage
@@ -233,10 +235,12 @@ pub fn run<S: Storage>(storage: S) -> anyhow::Result<()> {
         count(crm.leads.len(), "lead", "leads"),
     );
     // ... loop unchanged, except the save:
-    //             if let Err(e) = storage.save(&crm) {
+    //                 && let Err(e) = storage.save(&crm)
 ```
 
-Delete `DATA_FILE` and `use std::path::Path;` from this file. `cli` no longer knows about files.
+Delete `DATA_FILE`, the `let path = …` line and `use std::path::Path;` from this file, and
+replace `use crate::storage;` with the `use crate::storage::Storage;` above. `cli` no longer knows
+about files. (The "Loaded …" line loses its `from {DATA_FILE}` for the same reason.)
 
 Now `main` must choose. Let's pretend for a moment that a `--memory` flag selects the memory
 backend:
@@ -387,9 +391,9 @@ mixed values?), not by imagined speed.
 
 ```text
 error[E0782]: expected a type, found a trait
-  --> src/cli/mod.rs:34:25
+  --> src/cli/mod.rs:24:25
    |
-34 | pub fn run(storage: Box<Storage>) -> anyhow::Result<()> {
+24 | pub fn run(storage: Box<Storage>) -> anyhow::Result<()> {
    |                         ^^^^^^^
    |
 help: you can add the `dyn` keyword if you want a trait object
@@ -421,9 +425,9 @@ pub trait Storage {
 
 ```text
 error[E0038]: the trait `Storage` is not dyn compatible
-  --> src/cli/mod.rs:34:25
+  --> src/cli/mod.rs:24:25
    |
-34 | pub fn run(storage: Box<dyn Storage>) -> anyhow::Result<()> {
+24 | pub fn run(storage: Box<dyn Storage>) -> anyhow::Result<()> {
    |                         ^^^^^^^^^^^ `Storage` is not dyn compatible
    |
 note: for a trait to be dyn compatible it needs to allow building a vtable
@@ -462,7 +466,7 @@ The other common culprit is **`Self` by value**:
 ```text
 error[E0038]: the trait `Storage` is not dyn compatible
 ...
-22 |     fn duplicate(&self) -> Self;
+21 |     fn duplicate(&self) -> Self;
    |                            ^^^^ ...because method `duplicate` references the `Self` type in its return type
 ```
 
@@ -658,13 +662,13 @@ Type 'help' for a list of commands.
 Storage: in memory (nothing will be saved)
 Loaded 0 companies, 0 contacts, 0 deals, 0 leads
 crm> company list
-No companies found.
+No companies match.
 crm> quit
-Goodbye! (2 commands this session)
+Goodbye! (1 commands this session)
 ```
 
-`cargo run` loads your existing `crm-data.json` exactly as before, with
-`Storage: JSON file crm-data.json`. With `CRM_DATA_FILE=other.json` the banner says
+(`quit` itself isn't counted, as since Lab 14.) `cargo run` loads your existing `crm-data.json`
+exactly as before, with `Storage: JSON file crm-data.json`. With `CRM_DATA_FILE=other.json` the banner says
 `Storage: JSON file other.json`, and with the flag as well it says `third.json`: the flag wins.
 
 ## 🧠 Understand It

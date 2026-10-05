@@ -516,10 +516,12 @@ fn deal_with_empty_title_is_rejected() {
 
 ## 🔵 Your Turn 5: doc tests
 
-On the `Money` struct:
+On the `Money` struct (keep your existing doc lines, add the example below them):
 
 ```rust
-/// An amount of money, stored as whole cents.
+/// An amount of money, stored as a whole number of cents.
+///
+/// The field is private: the only ways in are `from_cents` and `parse`.
 ///
 /// ```
 /// use rust_crm::money::Money;
@@ -536,7 +538,7 @@ pub struct Money {
 On `Money::parse`:
 
 ```rust
-    /// Parses "1250", "1250.5" or "1250.50" into whole cents.
+    /// Parses user input such as `1250`, `1250.5`, `1250.50`, `$1,250.50`.
     ///
     /// ```
     /// use rust_crm::money::Money;
@@ -548,22 +550,20 @@ On `Money::parse`:
     pub fn parse(input: &str) -> Result<Money, ValidationError> {
 ```
 
-On `Email::parse`, add before the closing fence:
-
-```rust
-    ///
-    /// assert!(Email::parse("not an email").is_err());
-```
+`Email::parse` already ends with `assert!(Email::parse("not-an-email").is_err());` from Lab 13.
+If yours doesn't, add that line before the closing fence.
 
 `cargo test --doc`:
 
 ```text
-test src/contacts/email.rs - contacts::email::Email::parse (line 24) ... ok
-test src/money.rs - money::Money::parse (line 35) ... ok
-test src/money.rs - money::Money (line 11) ... ok
+test src/money.rs - money::Money (line 14) ... ok
+test src/contacts/email.rs - contacts::email::Email::parse (line 36) ... ok
+test src/money.rs - money::Money::parse (line 40) ... ok
 test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
-test src/contacts/email.rs - contacts::email::Email (line 12) - compile fail ... ok
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.06s
+test src/contacts/email.rs - contacts::email::Email (line 23) - compile fail ... ok
+test src/leads/conversion.rs - leads::conversion::Lead::convert (line 66) - compile fail ... ok
+test src/contacts/email.rs - contacts::email::Email (line 15) - compile fail ... ok
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.06s
 ```
 
 **Reasoning**
@@ -586,11 +586,13 @@ test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fini
 (after checkout, toolchain and cache restore). Clippy and Tests never run. Cheap checks first
 means fast feedback, and no CI minutes spent compiling code that would be rejected anyway.
 
-**Experiment 2 (allow `Won → Negotiation`).** The unit tests for `can_transition_to` from Lab 18
-fail (if you wrote one for closed stages), and so does the integration test
-`closed_deals_cannot_move`. The failure prints the test name and
-`assertion failed: matches!(result, Err(CrmError::InvalidTransition { .. }))`, which is enough to
-know which business rule broke without opening the code. That's the payoff of naming tests as
+**Experiment 2 (allow `Won → Negotiation`).** Lab 18's unit tests fail first:
+`deals::model::tests::transition_table_is_exactly_as_specified` (`won -> negotiation`) and
+`rejected_move_leaves_stage_unchanged`. `cargo test` stops after the first failing test binary
+(`error: test failed, to rerun pass --lib`), so you don't see the integration tests yet. Run
+`cargo test --no-fail-fast` and `closed_deals_cannot_move` in `tests/pipeline.rs` fails too, with
+`assertion failed: matches!(result, Err(CrmError::InvalidTransition { .. }))`. Both kinds caught it,
+and the names alone say which business rule broke. That's the payoff of naming tests as
 sentences.
 
 **Experiment 3 (`tempfile::tempdir().unwrap().path().join(...)`).** The `TempDir` is a

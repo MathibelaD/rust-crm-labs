@@ -7,20 +7,31 @@
 
 ## Mini-task 1 — `GET /ready`
 
-Add to `src/http/health.rs`, next to your Lab 27 `/health` handler:
+`src/http/health.rs` after the change. It has held the `/health` handler since Lab 27, and
+since Lab 29 a `routes()` function that `src/http/mod.rs` merges into the **public** part of the router
+(outside the `route_layer(require_auth)` from Lab 35), so `/ready` only needs one more
+`.route(...)` there:
 
 ```rust
-use std::time::Duration;
-
-use axum::{Json, extract::State, http::StatusCode};
+use super::AppState;
+use axum::{Json, Router, extract::State, http::StatusCode, routing::get};
 use serde_json::{Value, json};
-
-use super::AppState; // or crate::http::AppState, depending on your module layout
+use std::time::Duration;
 
 const READY_TIMEOUT: Duration = Duration::from_secs(2);
 
+pub fn routes() -> Router<AppState> {
+    Router::new()
+        .route("/health", get(health))
+        .route("/ready", get(ready))
+}
+
+async fn health() -> Json<Value> {
+    Json(json!({ "status": "ok" }))
+}
+
 /// Readiness: "can this instance do useful work right now?"
-pub async fn ready(State(state): State<AppState>) -> (StatusCode, Json<Value>) {
+async fn ready(State(state): State<AppState>) -> (StatusCode, Json<Value>) {
     let check = sqlx::query("SELECT 1").execute(&state.pool);
 
     match tokio::time::timeout(READY_TIMEOUT, check).await {
@@ -44,13 +55,7 @@ fn unavailable() -> (StatusCode, Json<Value>) {
 }
 ```
 
-Register it wherever `/health` is registered, on the **public** router (outside the
-`route_layer(require_auth)` from Lab 35):
-
-```rust
-.route("/health", get(health::health))
-.route("/ready", get(health::ready))
-```
+`src/http/mod.rs` doesn't change: it already has `.merge(health::routes())` on the public router.
 
 **Why it's written this way**
 
@@ -74,29 +79,25 @@ Register it wherever `/health` is registered, on the **public** router (outside 
   names, database names or user names. Logs are for operators. Response bodies are for anyone
   on the internet.
 
-### Tests (in `tests/api/`, e.g. a new `health.rs` registered in `tests/api/main.rs`)
+### Tests (a new `tests/api/health.rs`, plus `mod health;` in `tests/api/main.rs`)
 
 ```rust
-use axum::{body::Body, http::{Request, StatusCode}};
+use axum::http::StatusCode;
 use sqlx::{PgPool, postgres::PgPoolOptions};
 use std::time::Duration;
 
-use crate::helpers;
+use crate::helpers::{app, get, send};
 
 #[sqlx::test]
 async fn health_is_ok(pool: PgPool) {
-    let app = helpers::app(pool);
-    let req = Request::get("/health").body(Body::empty()).unwrap();
-    let (status, body) = helpers::send(app, req).await;
+    let (status, body) = send(&app(pool), get("/health")).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["status"], "ok");
 }
 
 #[sqlx::test]
 async fn ready_is_ok_with_a_healthy_database(pool: PgPool) {
-    let app = helpers::app(pool);
-    let req = Request::get("/ready").body(Body::empty()).unwrap();
-    let (status, body) = helpers::send(app, req).await;
+    let (status, body) = send(&app(pool), get("/ready")).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["status"], "ready");
 }
@@ -108,22 +109,21 @@ async fn ready_is_503_and_health_still_ok_when_database_is_unreachable() {
         .acquire_timeout(Duration::from_secs(5))
         .connect_lazy("postgres://crm:crm@127.0.0.1:1/crm")
         .unwrap();
+    let app = app(dead);
 
-    let req = Request::get("/ready").body(Body::empty()).unwrap();
-    let (status, body) = helpers::send(helpers::app(dead.clone()), req).await;
+    let (status, body) = send(&app, get("/ready")).await;
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
     assert_eq!(body["status"], "unavailable");
 
-    let req = Request::get("/health").body(Body::empty()).unwrap();
-    let (status, _) = helpers::send(helpers::app(dead), req).await;
+    let (status, _) = send(&app, get("/health")).await;
     assert_eq!(status, StatusCode::OK);
 }
 ```
 
 The third test is a plain `#[tokio::test]` because it deliberately has *no* working database.
-It takes about 2 s (the readiness timeout). If your `helpers::app` builds `AppState` with
-settings or JWT keys, it works unchanged, since `connect_lazy` gives a perfectly valid `PgPool`
-value that just can't connect.
+It takes about 2 s (the readiness timeout). `helpers::app` (Lab 33, JWT keys added in Lab 35,
+`token_ttl` in Lab 38) builds the full `AppState` with test JWT keys around whatever pool you give it, and
+`connect_lazy` gives a perfectly valid `PgPool` value that just can't connect.
 
 ---
 
@@ -221,7 +221,9 @@ JWT_SECRET=
 
 ## Your Turn 1 — CI `docker` job
 
-Add at the top level of `ci.yml` (if not already there):
+Lab 33's `on:` block runs CI on pushes to **every** branch. Since a push now publishes an
+image, narrow it to `main` and add release tags. Replace the `on:` block at the top of
+`ci.yml` with:
 
 ```yaml
 on:

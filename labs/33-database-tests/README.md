@@ -561,7 +561,7 @@ jobs:
           --health-retries 10
 
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -590,6 +590,10 @@ jobs:
 
 Line by line, the parts that are new:
 
+- **`jobs: test`**: the job id changes from Lab 24's `check` to `test`, and the step names get
+  shorter. Nothing else refers to the id yet, but Lab 40's `docker` job will (`needs: test`).
+- **`on: push:`** no longer has a `branches` filter, so every branch push runs CI. Lab 40
+  narrows it again when it starts publishing images.
 - **`services.postgres`** starts `postgres:17` before the steps run, with the same user, password
   and database as your compose file, so one `DATABASE_URL` works in both places. The
   `--health-*` options make the job **wait until Postgres accepts connections**. Without them the

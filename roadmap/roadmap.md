@@ -392,7 +392,9 @@ customers") and acceptance tests, but no instructions.
   compiler won't let you touch the lead again.
 - 💥 **Errors:** E0382 used *as a feature*: the compiler enforces your business rule.
 - **Outcome:** a complete lead → customer flow.
-- **Why it matters:** in Lab 31 this same conversion becomes a single DB transaction.
+- **Why it matters:** in Lab 31 this conversion becomes a single DB transaction. Because Postgres
+  hands out IDs *inside* the transaction, `convert(self, ids)` is redesigned there into
+  `plan_conversion(&self)`, and rollback takes over the "hand the lead back" job.
 
 #### Lab 20 — Activities, Notes & Time
 - **Rust concepts:** adding external crates (`cargo add`), semver and `Cargo.lock`, crate
@@ -423,7 +425,8 @@ month. Spec and acceptance tests only.
 #### Lab 22 — Professional Error Handling ♻️
 - **Rust concepts:** `thiserror` for library errors, `anyhow` for the application edge,
   error layering (domain → storage → app), `#[from]`, adding context, `Box<dyn Error>`, process
-  exit codes.
+  exit codes. CLI-only errors (`UnknownCommand`, `Usage`) move out of the domain `CrmError` into
+  a `CliError`: the library-vs-application split made concrete.
 - **CRM feature:** refactor every error path. Users see "Could not save data to
   crm-data.json: permission denied", not a debug dump.
 - **Outcome:** clean, layered errors.
@@ -530,7 +533,9 @@ contract only.
   `async_trait`), `FromRow`, `sqlx::Type` for newtype IDs and enums, `Option` ↔ `NULL`,
   **transactions**, turning unique-constraint violations into domain errors (duplicate email → 409).
 - **CRM feature:** all entities in Postgres; lead conversion is now atomic in a single
-  transaction.
+  transaction. Repositories end up as plain async functions taking `impl PgExecutor` (after you
+  see the dyn-compatibility error for yourself). The `Entity` trait, `InMemoryRepo`, `Crm` and the
+  storage layer are retired; the domain types and their unit tests survive unchanged.
 - **Outcome:** the whole CRM persists in Postgres.
 
 #### Lab 32 — Search, Filtering & Pagination in SQL
@@ -753,4 +758,6 @@ rust-crm/
 | Rust edition | 2024 | Current stable edition |
 | Solutions | In a separate `solutions.md` per lab | You only see them if you choose to |
 
-These can be changed before lab generation starts. See the README's "What happens next".
+The labs were written and verified against Rust 1.99 (edition 2024), axum 0.8, sqlx 0.9,
+tokio 1.x, jsonwebtoken 11, argon2 0.6 and tower-http 0.7. Each lab names the versions it was
+written against; if an API has moved on, check docs.rs for that crate.

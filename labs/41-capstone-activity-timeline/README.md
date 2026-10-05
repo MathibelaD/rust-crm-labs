@@ -30,9 +30,12 @@ You'll build **one chronological feed per company** that answers "what's been ha
 Acme?" in a single request, and the **event recording** that makes the missing history exist
 from now on.
 
-> This lab assumes your repo is at `lab-40`: Postgres repositories with `impl PgExecutor<'_>`
-> (Lab 31), transactional lead conversion (Lab 31), keyset `Cursor` (Lab 32), `#[sqlx::test]`
-> helpers (Lab 33), `AuthUser` + `policy::can` (Labs 35–36), tracing (Lab 37), and the Docker/CI
+> This lab assumes your repo is at `lab-40`: `ApiError`/`FieldError` and the `AppJson`/`AppQuery`/
+> `AppPath` extractors (Lab 28), Postgres repositories with `impl PgExecutor<'_>` (Lab 31),
+> transactional lead conversion (`leads::service::convert_lead`, Lab 31), keyset `Cursor` and
+> the `/history` feed (`history::page`, a `UNION ALL` of activities and notes paged by a
+> `HistoryPosition { at, item_type, id }` cursor, Lab 32), `#[sqlx::test]` helpers (Lab 33),
+> `AuthUser` + `policy::can` + `load_deal_for` (Labs 35–36), tracing (Lab 37), and the Docker/CI
 > pipeline (Lab 40). Challenges A–E are **not** required. If you did Challenge E (Teams), you
 > may extend the authorization rules to teams, but that's optional.
 
@@ -185,7 +188,7 @@ Authorization: Bearer <access token>
 | `type` | One of the four types |
 | `occurred_at` | RFC 3339, UTC, **full precision as stored** (microseconds) |
 | `subject` | Lab 20's `Subject` format: `company:N`, `contact:N`, `deal:N`. For `lead_converted`: `company:C` |
-| `actor` | The user who performed it (`created_by` / event actor), or `null` for system-created items (e.g. Lab 39's stale-deal follow-ups, if you created those without a user) |
+| `actor` | The user who performed it: `created_by` for activities and notes (Lab 35; it's `NOT NULL`, and Lab 39's stale-deal follow-ups use the deal's owner), the event's actor for events. `null` only if that user no longer exists or your design allows system-recorded events |
 | `summary` | Human-readable, at most 120 characters (truncate on a **char boundary**, Lab 09) |
 | `data` | Type-specific, exactly: `activity` → `{activity_id, kind, details}` (same `kind`/`details` shape as `GET /activities`); `note` → `{note_id, body}`; `deal_stage_changed` → `{deal_id, deal_title, from, to}`; `lead_converted` → `{lead_id, contact_id, deal_id}` (`deal_id` may be `null`) |
 | `next_cursor` | Opaque string, or `null` on the last page |
@@ -205,8 +208,9 @@ Money (if you include deal values anywhere) stays integer `value_cents`, as ever
 | `cursor` can't be decoded | 422 | `validation_failed` | `cursor` |
 
 **All** invalid query fields are reported in one response (Lab 28's "collect all field errors"
-rule), not just the first. That means you can't let axum's `Query<T>` reject a bad timestamp
-with its own 400. Think about where parsing should happen.
+rule), not just the first. That means you can't let `AppQuery<T>` (Lab 28) reject a bad
+timestamp during deserialization: that's a `400 bad_request` for the first problem only. Think
+about where parsing should happen.
 
 ---
 
@@ -334,8 +338,9 @@ Scenario: unknown company
   code. Errors map to Lab 28's `ApiError`.
 - **Don't filter in Rust after fetching a page.** Visibility and filters must be in the query,
   or pagination breaks (see FR6).
-- **Reuse, don't fork.** `Subject`, `Cursor` (adapt it if you must, and explain the change),
-  `ApiError`, `FieldError`, `AuthUser`, `policy`, the `PgExecutor` pattern.
+- **Reuse, don't fork.** `Subject`, `Cursor` / `HistoryPosition` (adapt them if you must, and
+  explain the change), `ApiError`, `FieldError`, the `App*` extractors, `AuthUser`, `policy`,
+  the `PgExecutor` pattern.
 - **The existing API stays backwards-compatible.** `/history`, `/activities`, `/notes` and
   their tests are unchanged and still pass.
 - **Migrations are additive** (Lab 40: expand, then contract).
@@ -448,16 +453,17 @@ its signature look like?
 <details><summary>Tier 2 — design</summary>
 
 `pub async fn record(db: impl PgExecutor<'_>, event: &NewEvent) -> Result<EventId, CrmError>`.
-Call it with `&mut *tx` *before* `tx.commit()`. If your Lab 31 stage-change code didn't use a
-transaction (an `UPDATE … WHERE stage = $old` is atomic on its own), it needs one now: two
-statements, one atomic unit.
+Call it with `&mut *tx` *before* `tx.commit()`. Lab 31's `deals::db::move_stage` takes
+`&PgPool` and uses no transaction (its `UPDATE … WHERE stage = $old` is atomic on its own), so
+it needs one now: two statements, one atomic unit.
 
 </details>
 
 <details><summary>Tier 3 — near-solution</summary>
 
-Stage change: `let mut tx = pool.begin().await?;` → `SELECT stage, title FROM deals WHERE id = $1 FOR UPDATE`
-→ check `can_transition_to` in Rust → `UPDATE … WHERE id = $1 AND stage = $old` (check
+Stage change (after Lab 36's `load_deal_for(.., Action::EditDeal)`):
+`let mut tx = pool.begin().await?;` → `SELECT stage, title, company_id FROM deals WHERE id = $1 FOR UPDATE`
+→ apply the Lab 18 rule `deal.move_to(next)?` in Rust → `UPDATE … WHERE id = $1 AND stage = $old` (check
 `rows_affected() == 1`) → `events::record(&mut *tx, &NewEvent::stage_changed(...))` →
 `tx.commit()`. Any `?` before `commit` drops `tx`, which rolls back, so there's no event
 without a change and no change without an event.
@@ -476,7 +482,8 @@ Four sources, one ordered page. You can merge in SQL or in Rust. Only one of tho
 <details><summary>Tier 2 — design</summary>
 
 `UNION ALL` of three `SELECT`s (activities, notes, events), each projecting the **same column
-list**, then an outer `ORDER BY … LIMIT`. Push the filters, the cursor predicate and a `LIMIT`
+list**, then an outer `ORDER BY … LIMIT`. Lab 32's `history::page` is the two-branch version of
+exactly this. Push the filters, the cursor predicate and a `LIMIT`
 into **each** branch so each can use its index and stop early. A rep's visibility is a CTE of
 "deal ids I can see", which each branch references.
 
@@ -495,8 +502,9 @@ cursor is built from the **last row you return**, not the extra one.
 
 <details><summary>Tier 1 — direction</summary>
 
-Lab 32's cursor was `occurred_at|id`. Why isn't `id` enough of a tie-breaker when rows come
-from three different tables?
+Lab 32's `Cursor` was `at|id`. Why isn't `id` enough of a tie-breaker when rows come from
+three different tables? (You've met this once already: how does `/history`'s `HistoryPosition`
+cursor solve it?)
 
 </details>
 
@@ -504,7 +512,8 @@ from three different tables?
 
 `activities.id = 5` and `notes.id = 5` can coexist. Add a per-source rank so the sort key is
 unique: `(occurred_at, source, id)`. Postgres compares row values lexicographically:
-`(occurred_at, source, id) < ($1, $2, $3)`.
+`(occurred_at, source, id) < ($1, $2, $3)`. That's `history::page`'s `(at, item_type, id)` key
+with a compact source number instead of the type name.
 
 </details>
 
@@ -527,9 +536,10 @@ You already decided in Lab 36 that list endpoints enforce visibility **in SQL**.
 
 <details><summary>Tier 2 — design</summary>
 
-Turn the `AuthUser` into a small enum before you query, e.g. `DealVisibility::All` or
-`DealVisibility::OwnedBy(UserId)`, using `policy::can(user, Action::ViewAllDeals, None)`. Pass
-it to the repository function, which turns it into one nullable bind parameter.
+Turn the `AuthUser` into a small value before you query, e.g. `DealVisibility::All` or
+`DealVisibility::OwnedBy(UserId)`, using `policy::can(user, Action::ViewAllDeals, None)`. That's
+what Lab 36's `list_deals` already does with `DealFilter { owner }`. Pass it to the repository
+function, which turns it into one nullable bind parameter.
 
 </details>
 
@@ -561,8 +571,9 @@ violates `CHECK (value_cents >= 0)`) and assert that no event exists.
 <details><summary>Tier 3 — near-solution</summary>
 
 Write fixtures (`tests/fixtures/timeline.sql`) with explicit timestamps rather than `now()`,
-so tests are deterministic. Use `helpers::register_and_login` from Lab 35 for each role, and
-promote users with a direct `UPDATE users SET role = …` in the test setup.
+so tests are deterministic. Use Lab 36's `helpers::login_as(&app, &pool, email, Role::Manager)`
+for each role (it registers, sets the role with a direct `UPDATE users`, and logs in again), and
+`helpers::create_deal` / `send_authed` for the setup requests.
 
 </details>
 

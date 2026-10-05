@@ -45,6 +45,7 @@ crm> contact list
 ID   NAME                 EMAIL                    PHONE          COMPANY
 #1   Ada Lovelace         ada@acme.io              555-0100       #1
 #2   Grace Hopper         grace@navy.mil           -              -
+Page 1 of 1
 ```
 
 Bad input is rejected by the types themselves:
@@ -57,12 +58,17 @@ Error: invalid lifecycle 'won' (expected prospect, customer or churned)
 And you'll have the trait that makes Lab 16 possible: `Entity`. The generic repository needs
 *some* way to ask "what's your id?" of a type it knows nothing about. That's what a trait is for.
 
-> **Starting point.** This lab assumes the Lab 14 layout: `src/companies/{mod.rs, model.rs,
-> store.rs}`, `src/contacts/{mod.rs, model.rs, store.rs, email.rs}`, `src/crm.rs`,
-> `src/errors.rs`, `src/cli/{mod.rs, parser.rs, commands.rs}`. Your Lab 14 code probably has
-> `summary()` methods on `Company` and `Contact`, and `Lifecycle::parse` / `Lifecycle::label`
-> carried over from `CustomerStatus`. If your helper names differ slightly, adapt; the lab
-> names every method it touches.
+> **Starting point.** This lab assumes you completed **Your Turn 1 in Lab 14**
+> (`Crm::remove_contact` / `Crm::remove_company` and the `company delete` / `contact delete`
+> commands; see [Lab 14's solutions.md](../14-companies-and-contacts/solutions.md) if not). It
+> also assumes the Lab 14 layout: `src/companies/{mod.rs, model.rs, store.rs}`,
+> `src/contacts/{mod.rs, model.rs, store.rs, email.rs}`, `src/crm.rs`, `src/errors.rs`,
+> `src/cli/{mod.rs, parser.rs, commands.rs}`. The pieces this lab touches: `Company::summary()`,
+> `Contact::summary()`, `Lifecycle::parse` / `Lifecycle::label`, the `clean_name` / `clean_phone`
+> helpers in `crm.rs` (`Crm::add_contact` checks the name, phone, company and duplicate email;
+> `ContactStore::add` checks nothing), and in `commands.rs` the `company` / `contact` handlers,
+> `update_contact`, `read_company_id` and `print_contact_line`. The parser matches on slices
+> (`("show", [id]) => ...`) and has `fn parse_id(raw: &str) -> Result<u64, CrmError>`.
 
 ---
 
@@ -262,6 +268,18 @@ use crate::entity::find_by_id;   // at the top
 
 Do the same in `src/contacts/store.rs` with `&self.contacts`. Run `cargo check`.
 
+It fails, and not where you might expect:
+
+```text
+error[E0277]: the trait bound `CompanyId: Hash` is not satisfied
+error[E0277]: the trait bound `ContactId: Hash` is not satisfied
+```
+
+Lab 14's ids derive `Debug, Clone, Copy, PartialEq, Eq`, but the trait demands
+`Id: Copy + Eq + Hash + Debug`. The compiler checks those bounds **at the impl**, so the trait
+is already enforcing its rules. Step 4 looks at this error in full. For now, add `Hash` to the
+`#[derive(...)]` on both `CompanyId` and `ContactId`, and `cargo check` is clean.
+
 ### Nominal typing, demonstrated
 
 > 🟡 **EXPERIMENT**: comment out the whole `impl Entity for Contact { ... }` block. `Contact`
@@ -270,31 +288,32 @@ Do the same in `src/contacts/store.rs` with `&self.contacts`. Run `cargo check`.
 
 ```text
 error[E0277]: the trait bound `Contact: Entity` is not satisfied
-  --> src/contacts/store.rs:56:20
+  --> src/contacts/store.rs:53:20
    |
-56 |         find_by_id(&self.contacts, id)
+53 |         find_by_id(&self.contacts, id)
    |         ---------- ^^^^^^^^^^^^^^ unsatisfied trait bound
    |         |
    |         required by a bound introduced by this call
    |
 help: the trait `Entity` is not implemented for `Contact`
-  --> src/contacts/model.rs:9:1
+  --> src/contacts/model.rs:12:1
    |
- 9 | pub struct Contact {
+12 | pub struct Contact {
    | ^^^^^^^^^^^^^^^^^^
 help: the trait `Entity` is implemented for `Company`
-  --> src/companies/model.rs:62:1
+  --> src/companies/model.rs:73:1
    |
-62 | impl Entity for Company {
+73 | impl Entity for Company {
    | ^^^^^^^^^^^^^^^^^^^^^^^
 note: required by a bound in `find_by_id`
-  --> src/entity.rs:20:22
+  --> src/entity.rs:18:22
    |
-20 | pub fn find_by_id<E: Entity>(items: &[E], id: E::Id) -> Option<&E> {
+18 | pub fn find_by_id<E: Entity>(items: &[E], id: E::Id) -> Option<&E> {
    |                      ^^^^^^ required by this bound in `find_by_id`
 ```
 
-(Your line numbers will differ. That's true of every error in this lab.)
+(The same error appears a second time, pointing at `id`. Your line numbers may differ. That's
+true of every error in this lab.)
 
 Read it as a chain: `find_by_id` **requires** `E: Entity` (the `note`), the call made
 `E = Contact` (the first arrow), and nobody wrote `impl Entity for Contact` (the first `help`).
@@ -354,20 +373,20 @@ pub enum Lifecycle {
 
 ```text
 error[E0277]: the trait bound `CompanyId: Hash` is not satisfied
-  --> src/companies/model.rs:84:15
+  --> src/companies/model.rs:74:15
    |
-84 |     type Id = CompanyId;
+74 |     type Id = CompanyId;
    |               ^^^^^^^^^ the trait `Hash` is not implemented for `CompanyId`
    |
 note: required by a bound in `Entity::Id`
-  --> src/entity.rs:11:26
+  --> src/entity.rs:9:26
    |
-11 |     type Id: Copy + Eq + Hash + Debug;
+ 9 |     type Id: Copy + Eq + Hash + Debug;
    |                          ^^^^ required by this bound in `Entity::Id`
 help: consider annotating `CompanyId` with `#[derive(Hash)]`
    |
- 8 + #[derive(Hash)]
- 9 | pub struct CompanyId(pub u64);
+ 5 + #[derive(Hash)]
+ 6 | pub struct CompanyId(pub u64);
    |
 ```
 
@@ -437,30 +456,59 @@ Now run `cargo check`. You've deleted two methods, so the compiler hands you a *
 
 ```text
 error[E0599]: no method named `summary` found for reference `&Company` in the current scope
-  --> src/cli/commands.rs:47:40
+  --> src/cli/commands.rs:36:40
    |
-47 |                 println!("{}", company.summary());
+36 |                 println!("{}", company.summary());
    |                                        ^^^^^^^ method not found in `&Company`
 
-error[E0599]: no method named `label` found for enum `Lifecycle` in the current scope
-  --> src/cli/commands.rs:66:63
+error[E0599]: no method named `summary` found for reference `&Company` in the current scope
+  --> src/cli/commands.rs:41:36
    |
-66 |             println!("Company #{} is now {}", id.0, lifecycle.label());
-   |                                                               ^^^^^ method not found in `Lifecycle`
+41 |             println!("{}", company.summary());
+   |                                    ^^^^^^^ method not found in `&Company`
+
+error[E0599]: no method named `label` found for enum `Lifecycle` in the current scope
+  --> src/cli/commands.rs:52:64
+   |
+52 |             println!("Company #{} is now {}.", id.0, lifecycle.label());
+   |                                                                ^^^^^ method not found in `Lifecycle`
+   |
+  ::: src/companies/model.rs:17:1
+   |
+17 | pub enum Lifecycle {
+   | ------------------ method `label` not found for this enum
+   |
+   = help: items from traits can only be used if the trait is implemented and in scope
+note: `Entity` defines an item `label`, perhaps you need to implement it
+  --> src/entity.rs:7:1
+   |
+ 7 | pub trait Entity {
+   | ^^^^^^^^^^^^^^^^
 ```
 
-Work through it: `company.summary()` becomes just `company` (`println!("{company}")`), and the
-stage message becomes:
+(The last `note` is the compiler noticing that *a trait* has a `label` method. Not what we want
+here, but it shows the compiler searches traits in scope when a method is missing.)
+
+Work through it: `company.summary()` becomes just `company` (`println!("{company}")`, in both
+`company list` and `company show`), and the stage message becomes:
 
 ```rust
-println!("Company {id} is now {lifecycle}");
+println!("Company {id} is now {lifecycle}.");
 ```
 
 (`id` now displays itself as `#2`.) While you're there, change the other `#{}` + `id.0`
 messages (`Added company #{}`, `Added contact #{}`, `Updated contact #{}`) to use `{id}`
 directly. In `src/errors.rs`, `HasContacts` can now say
-`write!(f, "company {id} still has contacts; delete them first")`. Keep going until
+`write!(f, "company {id} still has contacts; delete them first")`. (While you're in
+`errors.rs`: `DuplicateEmail` still says "a customer with email ..." from Lab 12. Make it
+`"a contact with email {email} already exists"`.) Keep going until
 `cargo check` is clean. Lifecycle's `parse` is still there; Step 7 replaces it.
+
+`cargo check` doesn't compile tests, but `cargo test` does, and the Lab 14 tests in
+`src/companies/model.rs` still call `summary()` and `label()`. Delete the
+`summary_shows_website_when_present` and `lifecycle_parse_and_label_round_trip` tests (Step 7
+writes a better round-trip test), and remove the `summary()` assertion from
+`new_companies_are_prospects`.
 
 ### Why `f.pad` and not `write!`?
 
@@ -481,20 +529,14 @@ ID   NAME                 STAGE     WEBSITE
 
 The id column collapsed: `{:<4}` was silently ignored. It's not a compile error; nothing
 checks that your `Display` honours padding. This is exactly the kind of thing to pin down with a
-test. Restore `f.pad` and add to the `tests` module in `src/companies/model.rs` (create one if it
-doesn't exist):
+test. Restore `f.pad` and add to the existing `tests` module in `src/companies/model.rs`:
 
 ```rust
-#[cfg(test)]
-mod tests {
-    use super::*;
-
     #[test]
     fn company_id_displays_with_hash() {
         assert_eq!(CompanyId(3).to_string(), "#3");
         assert_eq!(format!("[{:<4}]", CompanyId(3)), "[#3  ]");
     }
-}
 ```
 
 `.to_string()` comes free with `Display`: the standard library has
@@ -546,6 +588,7 @@ and in `company show`, printing the company as a one-row table followed by a bla
 the contact lines as they are (still `contact.summary()`) for now:
 
 ```rust
+            let company = crm.company(id)?;
             print_table(COMPANY_HEADER, &[company]);
             println!();
             let contacts = crm.contacts_of(id);
@@ -561,17 +604,17 @@ Does `&Company` implement `Display`? Yes, through another blanket impl:
 
 ```text
 error[E0277]: `Contact` doesn't implement `std::fmt::Display`
-  --> src/cli/commands.rs:84:42
+  --> src/cli/commands.rs:59:38
    |
-84 |                 print_table("contacts", &contacts);
-   |                 -----------              ^^^^^^^^ unsatisfied trait bound
-   |                 |
-   |                 required by a bound introduced by this call
+59 |             print_table("contacts", &contacts);
+   |             -----------              ^^^^^^^^ unsatisfied trait bound
+   |             |
+   |             required by a bound introduced by this call
    |
 help: the trait `std::fmt::Display` is not implemented for `Contact`
-  --> src/contacts/model.rs:24:1
+  --> src/contacts/model.rs:20:1
    |
-24 | pub struct Contact {
+20 | pub struct Contact {
    | ^^^^^^^^^^^^^^^^^^
    = note: required for `&Contact` to implement `std::fmt::Display`
 note: required by a bound in `print_table`
@@ -636,9 +679,9 @@ impl fmt::Display for Option<CompanyId> {
 
 ```text
 error[E0117]: only traits defined in the current crate can be implemented for types defined outside of the crate
-   --> src/contacts/model.rs:138:1
+   --> src/contacts/model.rs:168:1
     |
-138 | impl fmt::Display for Option<CompanyId> {
+168 | impl fmt::Display for Option<CompanyId> {
     | ^^^^^^^^^^^^^^^^^^^^^^-----------------
     |                       |
     |                       `Option` is not defined in the current crate
@@ -710,48 +753,45 @@ This impl looks trivial now, since `CompanyId(3)` already works. It becomes esse
 a generic repository that knows nothing about `CompanyId` will need a way to turn its `u64`
 counter into "whatever the id type is". It'll ask for `T::Id: From<u64>`.
 
-In `src/cli/commands.rs`, the `contact add` command builds a company id from user input. Make it
-use the conversion:
+In `src/cli/commands.rs`, `read_company_id` (used by `contact add`) builds a company id from
+user input. Make it use the conversion:
 
 ```rust
-                Some(raw) => Some(CompanyId::from(
-                    raw.parse::<u64>()
-                        .map_err(|_| CrmError::Usage("company id must be a number"))?,
-                )),
+    let id: u64 = input
+        .parse()
+        .map_err(|_| CrmError::Usage("company id must be a number (or blank for none)"))?;
+    Ok(Some(CompanyId::from(id)))
 ```
+
+Notice the new `: u64` annotation. Before, `CompanyId(id)` told the compiler that `id` is a `u64`
+(that's the field's type). `CompanyId::from(id)` doesn't: as far as inference knows, *any* `T`
+with a `From<T> for CompanyId` impl would do (there are two: yours, and the standard library's
+`From<CompanyId> for CompanyId`). Leave the annotation out and you get a confusing E0277 about
+`From<!>`. When a conversion is generic, tell the compiler the source type.
 
 ### `TryFrom<&str>` for `Email`
 
 Email parsing can fail, so it's `TryFrom`, not `From`. Move the body of `Email::parse` into the
 trait impl, and keep `parse` as a thin, readable wrapper (other code calls `Email::parse`, and
-it reads well):
+it reads well). Leave the rest of the file alone: the doc comments and their `compile_fail`
+doc tests, `as_str`, `domain` and the existing tests all stay.
 
-> 🟢 **FOLLOW ALONG**: `src/contacts/email.rs`
+> 🟢 **FOLLOW ALONG**: `src/contacts/email.rs`. Change the derive line, the body of `parse`, and
+> add two impls below `impl Email`:
 
 ```rust
-use std::fmt;
+use std::fmt;   // at the top
 
-use crate::errors::ValidationError;
-
-/// A validated, lower-cased email address.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Email(String);
 
 impl Email {
-    /// Parses and normalises an email address.
-    ///
-    /// ```
-    /// use rust_crm::contacts::Email;
-    /// let email = Email::parse("  Ada@Example.com ").unwrap();
-    /// assert_eq!(email.as_str(), "ada@example.com");
-    /// ```
+    // ...doc comment with the doc test stays as it is...
     pub fn parse(input: &str) -> Result<Email, ValidationError> {
         Email::try_from(input)
     }
 
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
+    // ...as_str and domain stay as they are...
 }
 
 impl TryFrom<&str> for Email {
@@ -759,17 +799,21 @@ impl TryFrom<&str> for Email {
 
     fn try_from(input: &str) -> Result<Self, Self::Error> {
         // ↓ your existing Email::parse body goes here, unchanged ↓
-        let email = input.trim().to_lowercase();
-        let invalid = || ValidationError::InvalidEmail(input.trim().to_string());
-
-        if email.chars().any(char::is_whitespace) || email.matches('@').count() != 1 {
-            return Err(invalid());
+        let candidate = input.trim().to_lowercase();
+        let valid = match candidate.split_once('@') {
+            Some((local, domain)) => {
+                !local.is_empty()
+                    && !domain.contains('@')
+                    && domain.contains('.')
+                    && !candidate.contains(char::is_whitespace)
+            }
+            None => false,
+        };
+        if valid {
+            Ok(Email(candidate))
+        } else {
+            Err(ValidationError::InvalidEmail(input.trim().to_string()))
         }
-        let (local, domain) = email.split_once('@').ok_or_else(invalid)?;
-        if local.is_empty() || !domain.contains('.') {
-            return Err(invalid());
-        }
-        Ok(Email(email))
     }
 }
 
@@ -780,7 +824,7 @@ impl fmt::Display for Email {
 }
 ```
 
-(If your Lab 12 validation rules differ, keep yours. Only the *location* moves.)
+(Only the *location* of the validation moves. The rules are the Lab 12 ones.)
 
 Three small decisions in there:
 
@@ -788,13 +832,9 @@ Three small decisions in there:
 - `Email` also derives `Eq, Hash` now. Emails are natural lookup keys.
 - `Display` for `Email` uses `f.pad`, so a contact row can put the email in a `{:<24}` column.
 
-Add a test that both spellings agree:
+Add a test to the existing `tests` module in `email.rs` that both spellings agree:
 
 ```rust
-#[cfg(test)]
-mod tests {
-    use super::*;
-
     #[test]
     fn try_from_and_try_into_agree() {
         let a = Email::try_from("Ada@Example.com").unwrap();
@@ -802,7 +842,6 @@ mod tests {
         assert_eq!(a, b);
         assert_eq!(a.to_string(), "ada@example.com");
     }
-}
 ```
 
 ### `FromStr` for `Lifecycle`
@@ -851,17 +890,27 @@ impl FromStr for Lifecycle {
 }
 ```
 
-Now the parser. Find where `company stage` used `Lifecycle::parse` and replace it with:
+Now the parser. In `parse_company`, the `company stage` arm used `Lifecycle::parse`:
 
 ```rust
-            let lifecycle: Lifecycle = args.get(2).ok_or(CrmError::Usage(usage))?.parse()?;
+        ("stage", [id, stage]) => CompanyCommand::Stage {
+            id: CompanyId(parse_id(id)?),
+            lifecycle: Lifecycle::parse(stage).ok_or(CrmError::Usage(COMPANY_USAGE))?,
+        },
 ```
 
-That one line uses **both** payoffs:
+Replace the `lifecycle` line with:
+
+```rust
+            lifecycle: stage.parse()?,
+```
+
+That one short line uses **both** payoffs:
 
 1. **`.parse()` uses `FromStr`.** `str::parse` is defined as
-   `fn parse<F: FromStr>(&self) -> Result<F, F::Err>`. The annotation `: Lifecycle` tells it
-   which `F`, and your impl is what runs.
+   `fn parse<F: FromStr>(&self) -> Result<F, F::Err>`. The field it's assigned to,
+   `lifecycle: Lifecycle` in `CompanyCommand::Stage`, tells it which `F`, and your impl is what
+   runs.
 2. **`?` uses `From`.** `parse()` returns `Result<Lifecycle, ValidationError>`, but
    `parse_command` returns `Result<_, CrmError>`. On an `Err(e)`, `?` doesn't return `e`, it
    returns `From::from(e)`. Your Lab 12 `impl From<ValidationError> for CrmError` is what makes
@@ -869,6 +918,21 @@ That one line uses **both** payoffs:
 
 A user who types `company stage 2 won` now gets a precise message instead of a generic usage
 line, and you wrote no code to connect the two error types here.
+
+That change of behaviour breaks one Lab 14 test: `malformed_commands_return_usage_errors` in
+`src/cli/parser.rs` lists `"company stage 1 vip"` as a usage error, and it's now a validation
+error. Remove that line from the list and pin the new behaviour with its own test (add
+`use crate::errors::ValidationError;` inside the `tests` module):
+
+```rust
+    #[test]
+    fn unknown_stage_is_a_validation_error() {
+        assert!(matches!(
+            parse_command("company stage 1 vip"),
+            Err(CrmError::Validation(ValidationError::InvalidLifecycle(_)))
+        ));
+    }
+```
 
 Add a round-trip test to the `tests` module in `src/companies/model.rs`: every lifecycle, shown
 with `Display` and parsed back with `FromStr`, should come back unchanged.
@@ -898,28 +962,33 @@ with `Display` and parsed back with `FromStr`, should come back unchanged.
 
 ```text
 error[E0277]: `?` couldn't convert the error to `CrmError`
-   --> src/cli/commands.rs:103:57
-    |
- 99 | fn execute_contact(crm: &mut Crm, command: ContactCommand) -> Result<(), CrmError> {
-    |                                                               -------------------- expected `CrmError` because of this
+  --> src/cli/commands.rs:89:57
+   |
+85 | fn contact(crm: &mut Crm, command: ContactCommand) -> Result<(), CrmError> {
+   |                                                       -------------------- expected `CrmError` because of this
 ...
-103 |             let email = Email::parse(&prompt("Email: "))?;
-    |                         --------------------------------^ the trait `From<ValidationError>` is not implemented for `CrmError`
-    |                         |
-    |                         this can't be annotated with `?` because it has type `Result<_, ValidationError>`
-    |
+89 |             let email = Email::parse(&prompt("Email: "))?;
+   |                         --------------------------------^ the trait `From<ValidationError>` is not implemented for `CrmError`
+   |                         |
+   |                         this can't be annotated with `?` because it has type `Result<_, ValidationError>`
+   |
 note: `CrmError` needs to implement `From<ValidationError>`
-   --> src/errors.rs:32:1
-    |
- 32 | pub enum CrmError {
-    | ^^^^^^^^^^^^^^^^^
-    = note: the question mark operation (`?`) implicitly performs a conversion on the error value using the `From` trait
+  --> src/errors.rs:40:1
+   |
+40 | pub enum CrmError {
+   | ^^^^^^^^^^^^^^^^^
+   = note: the question mark operation (`?`) implicitly performs a conversion on the error value using the `From` trait
 ```
 
-…and several more, including a strange one on the `.parse()?` line:
+…and seven more: the other `Email::parse(...)?` in `update_contact`, every `clean_name(..)?` and
+`clean_phone(..)?` in `crm.rs`, and a strange one on the `.parse()?` line:
 
 ```text
 error[E0271]: type mismatch resolving `<Lifecycle as FromStr>::Err == CrmError`
+  --> src/cli/parser.rs:67:30
+   |
+67 |             lifecycle: stage.parse()?,
+   |                              ^^^^^ type mismatch resolving `<Lifecycle as FromStr>::Err == CrmError`
 ```
 
 That's type inference working backwards: without a `From` conversion available, the only way
@@ -931,15 +1000,15 @@ is the sentence to remember: **`?` performs a conversion using the `From` trait.
 
 ```text
 error[E0277]: the trait bound `Lifecycle: FromStr` is not satisfied
-  --> src/cli/parser.rs:68:83
+  --> src/cli/parser.rs:67:30
    |
-68 |             let lifecycle: Lifecycle = args.get(2).ok_or(CrmError::Usage(usage))?.parse()?;
-   |                                                                                   ^^^^^ unsatisfied trait bound
+67 |             lifecycle: stage.parse()?,
+   |                              ^^^^^ unsatisfied trait bound
    |
 help: the trait `FromStr` is not implemented for `Lifecycle`
-  --> src/companies/model.rs:22:1
+  --> src/companies/model.rs:25:1
    |
-22 | pub enum Lifecycle {
+25 | pub enum Lifecycle {
    | ^^^^^^^^^^^^^^^^^^
    = help: the following other types implement trait `FromStr`:
              ByteString
@@ -960,8 +1029,9 @@ types that *do* qualify. Your type joins that list the moment you implement the 
 
 ## Step 8 — `Validate`: a trait with a default method
 
-Right now the "name must not be empty" check lives inside `Crm::add_company`, and the contact
-checks inside `Crm::add_contact`. Business rules belong to the **type**, so that every path that
+Right now the "name cannot be empty" check (`clean_name`) is called from `Crm::add_company`, and
+the contact checks (`clean_name`, `clean_phone`) from `Crm::add_contact` and
+`Crm::update_contact`. Business rules belong to the **type**, so that every path that
 creates or changes a company (CLI today, HTTP in Lab 28, CSV import in Challenge C) applies the
 same rules.
 
@@ -1035,7 +1105,7 @@ read a field of a moved value. `CompanyId` is `Copy`, so `id` is an independent 
 survives the move.
 
 The store returns `ValidationError` (it knows nothing about duplicates or "not found").
-`Crm::add_company` returns `CrmError`. Replace its body, including the old empty-name check:
+`Crm::add_company` returns `CrmError`. Replace its body, including the old `clean_name` call:
 
 ```rust
     pub fn add_company(
@@ -1048,8 +1118,11 @@ The store returns `ValidationError` (it knows nothing about duplicates or "not f
     }
 ```
 
-`?` converts again. If `ValidationError` is no longer used in `src/crm.rs`, remove it from the
-`use` line (the compiler will warn you). Add a test to `src/companies/model.rs`:
+`?` converts again. (`clean_name` is still used by the contact methods; Your Turn 1 retires it.)
+The `CompanyStore` tests now get a `Result` back from `add`: in `src/companies/store.rs`,
+compare against `Ok(CompanyId(1))` / `Ok(CompanyId(2))` in `ids_start_at_one_and_increase`, and
+add `.unwrap()` after `store.add(...)` in `remove_returns_the_company`. Add a test to
+`src/companies/model.rs`:
 
 ```rust
     fn company(name: &str, website: Option<&str>) -> Company {
@@ -1093,9 +1166,9 @@ compile time, or you want *different* types in one collection.
 
 ```text
 error[E0308]: mismatched types
-  --> src/cli/commands.rs:89:27
+  --> src/cli/commands.rs:74:27
    |
-89 |                 rows.push(contact);
+74 |                 rows.push(contact);
    |                      ---- ^^^^^^^ expected `&Company`, found `&Contact`
    |                      |
    |                      arguments to this method are incorrect
@@ -1172,9 +1245,9 @@ Note that `print_table(..., &rows)` still compiles: `rows` is a `&[&dyn Display]
 
 ```text
 error[E0191]: the value of the associated type `Id` in `Entity` must be specified
-  --> src/cli/commands.rs:87:40
+  --> src/cli/commands.rs:72:40
    |
-87 |             let mut labelled: Vec<&dyn Entity> = vec![company];
+72 |             let mut labelled: Vec<&dyn Entity> = vec![company];
    |                                        ^^^^^^
    |
   ::: src/entity.rs:11:5
@@ -1184,7 +1257,7 @@ error[E0191]: the value of the associated type `Id` in `Entity` must be specifie
    |
 help: specify the associated type
    |
-87 |             let mut labelled: Vec<&dyn Entity<Id = /* Type */>> = vec![company];
+72 |             let mut labelled: Vec<&dyn Entity<Id = /* Type */>> = vec![company];
    |                                              +++++++++++++++++
 ```
 
@@ -1193,15 +1266,15 @@ isn't a complete type. Try the suggestion with `Entity<Id = CompanyId>`:
 
 ```text
 error[E0271]: type mismatch resolving `<Contact as Entity>::Id == CompanyId`
-  --> src/cli/commands.rs:89:31
+  --> src/cli/commands.rs:74:31
    |
-89 |                 labelled.push(contact);
+74 |                 labelled.push(contact);
    |                               ^^^^^^^ type mismatch resolving `<Contact as Entity>::Id == CompanyId`
    |
 note: expected this to be `CompanyId`
-  --> src/contacts/model.rs:33:15
+  --> src/contacts/model.rs:73:15
    |
-33 |     type Id = ContactId;
+73 |     type Id = ContactId;
    |               ^^^^^^^^^
    = note: required for the cast from `&Contact` to `&dyn Entity<Id = CompanyId>`
 ```
@@ -1238,36 +1311,36 @@ Rust CRM v0.1.0
 Type 'help' for a list of commands.
 crm> company add
 Name: Acme Corp
-Website (blank for none): acme.io
+Website (optional): acme.io
 Added company #1
 crm> company add
 Name: Globex
-Website (blank for none): globex com
+Website (optional): globex com
 Error: invalid website: globex com
 crm> company add
 Name: Globex
-Website (blank for none): globex.com
+Website (optional): globex.com
 Added company #2
 crm> company stage 2 customer
-Company #2 is now customer
+Company #2 is now customer.
 crm> company stage 2 won
 Error: invalid lifecycle 'won' (expected prospect, customer or churned)
 crm> contact add
 Name: Ada Lovelace
 Email: ada@acme.io
-Phone (blank for none): 555-0100
+Phone (optional): 555-0100
 Company id (blank for none): 1
 Added contact #1
 crm> contact add
 Name: Grace Hopper
 Email: grace@navy.mil
-Phone (blank for none): call me
+Phone (optional): call me
 Company id (blank for none):
-Error: invalid phone number: call me
+Error: 'call me' is not a valid phone number
 crm> contact add
 Name: Grace Hopper
 Email: grace@navy.mil
-Phone (blank for none):
+Phone (optional):
 Company id (blank for none):
 Added contact #2
 crm> company list
@@ -1275,13 +1348,14 @@ ID   NAME                 STAGE     WEBSITE
 #1   Acme Corp            prospect  acme.io
 #2   Globex               customer  globex.com
 crm> contact list
-#1 Ada Lovelace <ada@acme.io> 555-0100 (company #1)
-#2 Grace Hopper <grace@navy.mil> - (no company)
+#1 Ada Lovelace <ada@acme.io> 555-0100 @ Acme Corp
+#2 Grace Hopper <grace@navy.mil>
+Page 1 of 1
 crm> company show 1
 ID   NAME                 STAGE     WEBSITE
 #1   Acme Corp            prospect  acme.io
 
-  #1 Ada Lovelace <ada@acme.io> 555-0100 (company #1)
+  #1 Ada Lovelace <ada@acme.io> 555-0100
 crm> contact delete 2
 Deleted contact #2 (Grace Hopper <grace@navy.mil>)
 crm> company delete 1
@@ -1291,8 +1365,10 @@ Goodbye! (13 commands this session)
 ```
 
 Notice that the failed `Globex` didn't use up id `#2`: `CompanyStore::add` validates *before*
-incrementing `next_id`. Keep that in mind; it changes in Lab 16. (Your exact `contact list`
-format is whatever your Lab 14 `summary()` produced; that's about to go.)
+incrementing `next_id`. Keep that in mind; it changes in Lab 16. The contact lines still come
+from Lab 14's `summary()` and `print_contact_line`; Your Turn 2 replaces them with a table.
+The phone is still checked by Lab 14's `clean_phone` in `Crm::add_contact` (that's why the
+company id prompt still appears after a bad phone); Your Turn 1 moves that rule onto `Contact`.
 
 ## 🧠 Understand It
 
@@ -1345,28 +1421,32 @@ one impl in the whole program, so adding a crate can never make your code ambigu
 > Implement `Validate` for `Contact` in `src/contacts/model.rs`, then make the stores and `Crm`
 > use it instead of the ad-hoc checks.
 >
-> Rules, checked in this order:
+> Rules, checked in this order (the same rules Lab 12's `parse_phone` enforces):
 > 1. `name.trim()` empty → `ValidationError::EmptyName`
 > 2. `phone` is `Some(p)` and `p` contains any character other than ASCII digits, space, `+`,
 >    `-`, `(`, `)` → `ValidationError::InvalidPhone(p)` (the phone as typed)
-> 3. `phone` is `Some(p)` and `p` contains **no** digit at all (e.g. `"---"`) →
+> 3. `phone` is `Some(p)` and `p` contains **fewer than 7** digits (e.g. `"12345"`, `"---"`) →
 >    `ValidationError::InvalidPhone(p)`
 >
 > Wiring:
 > - `ContactStore::add` builds the `Contact`, calls `validate()?`, and only then increments
->   `next_id` and pushes (same pattern as `CompanyStore::add`).
-> - Delete the name and phone checks from `Crm::add_contact`. The company-exists check stays in
->   `Crm` (a contact can't know whether a company exists).
+>   `next_id` and pushes (same pattern as `CompanyStore::add`). It returns
+>   `Result<ContactId, ValidationError>`.
+> - Delete the `clean_name` / `clean_phone` calls from `Crm::add_contact`. The company-exists and
+>   duplicate-email checks stay in `Crm` (a contact can't know about other records).
 > - `Crm::update_contact` must validate the **result** of the update *before* changing the stored
 >   contact: if the new phone is invalid, the stored contact is left completely unchanged.
+> - When nothing calls `clean_name` and `clean_phone` any more, delete them. (`parse_phone` in
+>   `contacts/model.rs` can stay; nothing in the CRM needs it after this.)
 
-- [ ] `contact add` with phone `call me` prints `Error: invalid phone number: call me`
-- [ ] `contact add` with a blank name prints `Error: name must not be empty`
+- [ ] `contact add` with phone `call me` prints `Error: 'call me' is not a valid phone number`
+- [ ] `contact add` with a blank name prints `Error: name cannot be empty`
 - [ ] `contact update 1` with new phone `???` prints the error, and `contact show 1` shows the
       old phone
-- [ ] tests: a valid contact passes; a blank name fails; `"call me"`, `"---"` and `""` all fail
-      with `InvalidPhone`
-- [ ] `cargo test` passes
+- [ ] tests: a valid contact passes; a blank name fails; `"call me"`, `"12345"`, `"---"` and
+      `""` all fail with `InvalidPhone`
+- [ ] `cargo test` passes (the Lab 14 `Crm` tests, including `blank_names_are_rejected`, still
+      pass unchanged)
 
 > 🔵 **YOUR TURN 2: `Display` for `Contact`**
 >
@@ -1382,8 +1462,11 @@ one impl in the whole program, so adding a crate can never make your code ambigu
 > there's none), then the company id as `#2` or `-` when there's none. One space between
 > columns, no trailing spaces after the last column.
 >
-> Then use `print_table(CONTACT_HEADER, ...)` in `contact list`, `contact show`,
-> `contact search` and `company show`, and **delete `Contact::summary`**.
+> Then use `print_table(CONTACT_HEADER, ...)` in `contact list` (keep the `Page 1 of 1` footer),
+> `contact show` (keep the phone / domain / initials lines under the table), `contact search`
+> and `company show`, and **delete `Contact::summary`** and `print_contact_line` (the COMPANY
+> column replaces its `@ Acme Corp`). `update_contact`'s `Editing ...` line can use the
+> contact's `label()`.
 
 - [ ] `Contact { id: ContactId(1), name: "Ada Lovelace", email: "ada@example.com", phone: Some("555-0100"), company_id: Some(CompanyId(2)) }`
       displays exactly as
@@ -1391,31 +1474,33 @@ one impl in the whole program, so adding a crate can never make your code ambigu
 - [ ] with no phone and no company:
       `#1   Ada Lovelace         ada@example.com          -              -`
 - [ ] `contact list` prints the header and one row per contact
-- [ ] `Contact::summary` no longer exists; `cargo clippy` shows no warnings
+- [ ] `Contact::summary` no longer exists (fix the Lab 14 tests in `contacts/model.rs` that
+      used it); `cargo clippy` shows no warnings
 - [ ] a test asserts both strings above
 
 > 🔵 **YOUR TURN 3: one `parse_id` for every id type**
 >
 > Your parser has a helper that parses a `u64` and the call sites wrap it:
-> `CompanyId(parse_id(args.get(1), "company show <id>")?)`. Make the helper **generic over the
-> id type** so call sites become `parse_id(args.get(1), "company show <id>")?` and the compiler
-> works out which id type to build from the enum field it's assigned to.
+> `id: CompanyId(parse_id(id)?)`. Make the helper **generic over the id type** so call sites
+> become `id: parse_id(id)?` and the compiler works out which id type to build from the enum
+> field it's assigned to.
 >
-> Keep the helper's argument types (the `Option<&&str>` from `args.get(..)` and the usage
-> string). Change only the type parameter, bound, return type and body.
+> Keep the helper's argument (`raw: &str`) and its usage message. Change only the type
+> parameter, bound, return type and body.
 
-- [ ] no call site in `parser.rs` mentions `CompanyId(` or `ContactId(` any more
+- [ ] no call site in `parser.rs` mentions `CompanyId(` or `ContactId(` any more (the tests
+      still do, and that's fine)
 - [ ] `company show abc` still prints the usage error
 - [ ] the existing parser tests pass unchanged
 
 ## 💡 Hint
 
 > 💡 **HINT (Your Turn 1)**: `Validate for Company` is your template. For the phone, iterate
-> over `phone.chars()` and use `.all(...)` for rule 2 and `.any(...)` for rule 3.
+> over `phone.chars()` and use `.all(...)` for rule 2 and `.filter(...).count()` for rule 3.
 
 <details><summary>Hint 2 (more specific)</summary>
 
-For `update_contact`: `get` a `&mut Contact`, `.clone()` it into a local `updated`, apply the
+For `update_contact`: get a `&mut Contact` with `find_mut`, `.clone()` it into a local `updated`, apply the
 changes to `updated`, call `updated.validate()?`, and only then write it back with
 `*contact = updated;`. If `validate` fails, `?` returns early and the stored contact was never
 touched. Cloning one contact is cheap; a half-applied update is not.
@@ -1440,8 +1525,8 @@ A `match self.company_id { Some(id) => id.to_string(), None => String::from("-")
 
 <details><summary>Hint 2 (more specific)</summary>
 
-`fn parse_id<Id: From<u64>>(arg: Option<&&str>, usage: &'static str) -> Result<Id, CrmError>`.
-In the body, `Option::map` can apply `Id::from` to the parsed number.
+`fn parse_id<Id: From<u64>>(raw: &str) -> Result<Id, CrmError>`.
+In the body, `Result::map` can apply `Id::from` to the parsed number.
 
 </details>
 

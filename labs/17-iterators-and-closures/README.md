@@ -1026,7 +1026,7 @@ fn parse_contact_list(args: &[&str]) -> Result<(ContactFilter, usize), CrmError>
     let mut page = 1;
     for (flag, value) in flag_pairs(args, usage)? {
         match flag {
-            "--company" => filter.company = Some(parse_id(Some(&value), usage)?),
+            "--company" => filter.company = Some(parse_id(value)?),
             "--search" => filter.search = Some(value.to_string()),
             "--sort" => {
                 filter.sort = match value {
@@ -1061,8 +1061,8 @@ Points to notice:
   `args` the slice. Lab 10's reasoning, applied.
 - **Flags in any order, repeated flags**: the last one wins. A flag without a value, a bare word,
   an unknown flag, an unknown sort, or page `0` are all usage errors.
-- `parse_id(Some(&value), usage)?` reuses your Lab 15 generic `parse_id`; the target type
-  `CompanyId` is inferred from `filter.company`.
+- `parse_id(value)?` reuses your Lab 15 generic `parse_id`; the target type `CompanyId` is
+  inferred from `filter.company`. (A bad id reports `parse_id`'s own usage message.)
 - The page number goes through `Option`'s **combinators**: `ok()` (Result → Option), `filter`
   (keep only `p > 0`), `ok_or` (back to a Result with our error). Option and Result have their own
   `map`/`filter`/`and_then`: same vocabulary as iterators, for "zero or one" values.
@@ -1081,18 +1081,22 @@ pub(crate) enum ContactCommand<'a> {
 }
 ```
 
-and the `list` arm of `parse_contact`:
+and in `parse_contact`, replace the two Lab 14 `list` arms (`("list", [])` and
+`("list", [page])`) with one:
 
 ```rust
-        Some("list") => {
-            let (filter, page) = parse_contact_list(&args[1..])?;
-            Ok(ContactCommand::List { filter, page })
+        ("list", flags) => {
+            let (filter, page) = parse_contact_list(flags)?;
+            ContactCommand::List { filter, page }
         }
 ```
 
-`&args[1..]` is everything after `list` (Lab 09 slices). The old positional `contact list 2`
-becomes a usage error; it's `contact list --page 2` now. Update your parser tests (the old
-`List { page: 1 }` test no longer compiles) and add new ones:
+`flags` binds the whole rest of the slice: the `(sub, args)` match already split off `contact`
+and `list`, so `flags` is everything after them (Lab 11 slice patterns), possibly empty. The old
+positional `contact list 2` becomes a usage error; it's `contact list --page 2` now. Update your
+parser tests: the `contact list` assertion in Lab 14's `parse_contact_commands` test
+(`List { page: 1 }`) no longer compiles, so delete it, and add these (they need `ContactFilter`
+and `ContactSort`, which `use super::*;` brings in from the parser's own imports):
 
 ```rust
     #[test]
@@ -1179,7 +1183,8 @@ the raw storage was only ever right for "list everything in insertion order". De
     }
 ```
 
-Finally, update the `contact` line of `print_help` to show the new flags.
+Finally, update the `contact list` line of `print_help` to show the new flags, and change
+`list [page]` to `list [flags]` in the `CONTACT_USAGE` constant in `parser.rs`.
 
 ---
 
@@ -1230,12 +1235,12 @@ Error: usage: contact list [--company <id>] [--search <term>] [--sort id|name|em
 crm> contact list 2
 Error: usage: contact list [--company <id>] [--search <term>] [--sort id|name|email] [--page <n>]
 crm> quit
-Goodbye! (17 commands this session)
+Goodbye! (18 commands this session)
 ```
 
-(Zoe Ad**a**ms matches `ada`: the search is a substring match on name or email. The count is 17
-because commands rejected by the *parser* aren't counted. The `usage:` prefix comes from your Lab 12
-`CrmError::Usage` message.)
+(Zoe Ad**a**ms matches `ada`: the search is a substring match on name or email. The count is 18:
+the 11 commands that created the data plus the 7 queries; your Lab 14 loop counts rejected
+commands too. The `usage:` prefix comes from your Lab 12 `CrmError::Usage` message.)
 
 ## 🧠 Understand It
 
@@ -1333,7 +1338,8 @@ error: lifetime may not live long enough
 > 🔵 **YOUR TURN 2: `company list` flags**
 >
 > Support `company list [--stage <prospect|customer|churned>] [--search <term>]`:
-> `CompanyCommand::List` becomes `List { filter: CompanyFilter }`, parsed with `flag_pairs`.
+> `CompanyCommand::List` becomes `List { filter: CompanyFilter }`, parsed with `flag_pairs`
+> (the `("list", [])` arm of `parse_company` becomes `("list", flags)`).
 > `--stage` must use your `FromStr for Lifecycle` (Lab 15), so a bad stage reports the lifecycle
 > error, not a usage error. Empty results print `No companies match.` Update `help`.
 

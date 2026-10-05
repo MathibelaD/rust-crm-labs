@@ -224,17 +224,19 @@ exactly the places that *really* convert a `u64` into a `ContactId`:
 
 ```text
 error[E0277]: the trait bound `ContactId: From<u64>` is not satisfied
-  --> src/cli/parser.rs:93:17
+  --> src/cli/parser.rs:81:54
    |
-93 |             id: parse_id(args.get(1), "contact show <id>")?,
-   |                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ unsatisfied trait bound
+81 |         ("show", [id]) => ContactCommand::Show { id: parse_id(id)? },
+   |                                                      ^^^^^^^^^^^^ unsatisfied trait bound
 ...
 error[E0599]: the method `next_id` exists for struct `InMemoryRepo<Contact>`, but its trait bounds were not satisfied
-  --> src/crm.rs:47:31
+  --> src/crm.rs:62:50
    |
-47 |             id: self.contacts.next_id(),
-   |                               ^^^^^^^ private field, not a method
+62 |         let contact = Contact::new(self.contacts.next_id(), name, email, phone, company_id);
+   |                                                  ^^^^^^^ private field, not a method
 ```
+
+(Four errors in all: `parse_id` for `contact show`, `update` and `delete`, plus `next_id`.)
 
 (The odd label "private field, not a method" appears because the struct also has a private
 *field* called `next_id`. The compiler mentions it in case you meant the field. You didn't.)

@@ -70,7 +70,7 @@ mod tests {
 - **`while let Some(cause) = source`** walks a linked list of borrowed references. Nothing is
   cloned or moved: every `cause` borrows from `err`, and they all live as long as `err` does.
 - **Why not just `format!("{err:#}")`?** For `anyhow::Error`, the alternate `Display` (`{:#}`)
-  prints exactly this chain, and that's what Lab 34's `eprintln!` used. But `{:#}` on a plain
+  prints exactly this chain, and that's what Lab 28's `eprintln!` printed. But `{:#}` on a plain
   `thiserror` enum prints only the top-level message (thiserror ignores `#`). `error_chain`
   works for **any** error, which Lab 39's worker needs (`sqlx::Error`, `anyhow::Error`).
 - **`anyhow` and `.source()`.** `err.as_ref()` gives the `dyn Error` view of an
@@ -199,8 +199,14 @@ pub async fn get(db: impl PgExecutor<'_>, id: DealId) -> Result<Deal, CrmError> 
 #[tracing::instrument(skip(db))]
 pub async fn list(db: impl PgExecutor<'_>, filter: &DealFilter) -> Result<Vec<Deal>, CrmError> { … }
 
+#[tracing::instrument(skip(pool))]
+pub async fn move_stage(pool: &PgPool, id: DealId, next: DealStage) -> Result<Deal, CrmError> { … }
+
 #[tracing::instrument(skip(db))]
-pub async fn set_stage(db: impl PgExecutor<'_>, id: DealId, from: DealStage, to: DealStage) -> … { … }
+pub async fn search(db: impl PgExecutor<'_>, term: &str, limit: i64, filter: &DealFilter) -> … { … }
+
+#[tracing::instrument(skip(db))]
+pub async fn pipeline(db: impl PgExecutor<'_>) -> Result<Vec<PipelineRow>, CrmError> { … }
 
 #[tracing::instrument(skip(db))]
 pub async fn set_owner(db: impl PgExecutor<'_>, id: DealId, owner: UserId) -> … { … }
@@ -210,7 +216,7 @@ pub async fn set_owner(db: impl PgExecutor<'_>, id: DealId, owner: UserId) -> �
 
 ```rust
 #[tracing::instrument(skip_all, fields(company_id = req.company_id))]
-async fn create_deal(user: AuthUser, State(state): State<AppState>, Json(req): Json<CreateDealRequest>)
+async fn create_deal(user: AuthUser, State(state): State<AppState>, AppJson(req): AppJson<CreateDealRequest>)
     -> Result<(StatusCode, Json<DealResponse>), ApiError>
 {
     // ...

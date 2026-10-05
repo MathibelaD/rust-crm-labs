@@ -121,24 +121,30 @@ owned `String` inside the tuple, and `dummy_hash()` returns an owned clone. Both
 
 ## Your Turn 3 — owners for leads and activities
 
-The exact code depends on how your Lab 29–31 leads and activities modules are shaped. Here is the
-change, shown in the shapes this course uses. Apply the *same deltas* to yours.
+The code below is the Lab 31–33 code with the owner added. If your modules differ, apply the
+*same deltas* to yours.
 
 ### Leads
 
 ```rust
-// src/leads/db.rs: insert gains the owner
-pub async fn insert(db: impl PgExecutor<'_>, new: &NewLead, owner_id: UserId) -> Result<Lead, CrmError> {
+// src/leads/db.rs: LeadRow gains `owner_id: i64`, TryFrom<LeadRow> sets
+// `owner_id: UserId(row.owner_id)`, every SELECT/RETURNING lists owner_id,
+// and insert gains the owner:
+pub async fn insert(
+    db: impl PgExecutor<'_>,
+    new: &NewLead,
+    owner_id: UserId,
+) -> Result<Lead, CrmError> {
     let row = sqlx::query_as!(
         LeadRow,
-        "INSERT INTO leads (name, email, company_name, source, status, notes, owner_id)
-         VALUES ($1, $2, $3, $4, 'new', $5, $6)
+        "INSERT INTO leads (name, email, company_name, source, notes, owner_id)
+         VALUES ($1, $2, $3, $4, $5, $6)
          RETURNING id, name, email, company_name, source, status, notes, owner_id",
-        &new.name,
+        new.name,
         new.email.as_str(),
-        new.company_name.as_deref(),
-        new.source.as_str(),   // or .to_string(), however you stored LeadSource
-        new.notes.as_deref(),
+        new.company_name,
+        new.source.to_string(),
+        new.notes,
         owner_id.0,
     )
     .fetch_one(db)
@@ -147,14 +153,13 @@ pub async fn insert(db: impl PgExecutor<'_>, new: &NewLead, owner_id: UserId) ->
 }
 ```
 
-- `LeadRow` gains `owner_id: i64`. Every `SELECT`/`RETURNING` on `leads` lists it.
-- Whether the domain `Lead` gets an `owner_id: UserId` field is your call. If `LeadResponse`
-  should expose the owner (the criteria say yes), the simplest route is: `Lead` gains
-  `pub owner_id: UserId`, `TryFrom<LeadRow>` fills it, and `LeadResponse::from(&Lead)` copies
-  `owner_id.0`. The builder from Lab 19 then needs an owner too. Either `.owner(UserId)` with a
-  `build()` error if missing, or `Lead::builder(id, name, email, owner)`. A required value
-  belongs in the constructor, not an optional setter, so `builder(..., owner)` is the better design.
-- Handler:
+- `Lead` (the saved record) gains `pub owner_id: UserId`, and `LeadResponse::from(&Lead)` copies
+  `owner_id.0`.
+- `NewLead` and `LeadBuilder` (Lab 31) **don't** change. Like `notes::db::insert`, the owner is
+  a separate argument to `insert`: it isn't something the client described, it's who is asking.
+  That keeps the builder's job (validate what the client sent) separate from the server's job
+  (decide the owner).
+- Handler: one new parameter, one new argument.
 
 ```rust
 async fn create_lead(
@@ -162,7 +167,8 @@ async fn create_lead(
     State(state): State<AppState>,
     AppJson(req): AppJson<CreateLeadRequest>,
 ) -> Result<(StatusCode, Json<LeadResponse>), ApiError> {
-    let new = NewLead::try_from(req).map_err(ApiError::Validation)?; // your Lab 28 pattern
+    // ... email parsing and the NewLead::builder(..) chain exactly as in Lab 31 ...
+    let new = builder.build().map_err(CrmError::from)?;
     let lead = leads::db::insert(&state.pool, &new, user.id).await?;
     Ok((StatusCode::CREATED, Json(LeadResponse::from(&lead))))
 }
@@ -172,35 +178,54 @@ async fn create_lead(
 
 ```rust
 // src/leads/model.rs
-pub struct ConversionIds {
-    pub company: CompanyId,
-    pub contact: ContactId,
-    pub deal: DealId,
-    pub owner: UserId,   // NEW: who owns records created by the conversion
+pub struct ConversionPlan {
+    pub company: NewCompany,
+    pub contact_name: String,
+    pub contact_email: Email,
+    pub deal: Option<NewDealInput>,
+    /// Who will own the records the conversion creates: the lead's owner.
+    pub owner_id: UserId, // NEW
 }
 
-// inside Lead::convert, where the Deal is built:
-Deal {
-    id: ids.deal,
-    company_id: ids.company,
-    title,
-    value,
-    stage: DealStage::Qualification,
-    owner_id: ids.owner,
-}
+// at the end of Lead::plan_conversion:
+Ok(ConversionPlan {
+    company: NewCompany { name: company_name, website: None },
+    contact_name: self.name.clone(),
+    contact_email: self.email.clone(),
+    deal,
+    owner_id: self.owner_id, // NEW
+})
 ```
 
 ```rust
-// src/leads/service.rs: in convert_lead, the locking SELECT also reads owner_id
-let row = sqlx::query!(
-    "SELECT /* ...your existing columns..., */ owner_id FROM leads WHERE id = $1 FOR UPDATE",
-    id.0,
-)
-.fetch_optional(&mut *tx)
-.await?
-.ok_or(CrmError::NotFound { entity: "lead", id: id.0 })?;
-let owner = UserId(row.owner_id);
-// ... later, when you build ConversionIds { ..., owner }
+// src/leads/service.rs: convert_lead, the deal insert
+let deal_id = match plan.deal {
+    Some(input) => {
+        let new = input.for_company(company.id, plan.owner_id);
+        let deal = deals::db::insert(&mut *tx, &new).await?;
+        Some(deal.id)
+    }
+    None => None,
+};
+```
+
+Nothing else in `convert_lead` changes: `leads::db::get_for_update` already returns a `Lead`
+built from `LeadRow`, and its `SELECT ... FOR UPDATE` now lists `owner_id`. The `lead()` helper
+in the `leads/model.rs` unit tests gets `owner_id: UserId(1)`.
+
+A repository test pins the rule down (`tests/db/leads.rs`, `deals` imported as
+`rust_crm::deals::{self, NewDealInput}`):
+
+```rust
+#[sqlx::test(fixtures(path = "../fixtures", scripts("users", "leads")))]
+async fn converted_deal_belongs_to_the_leads_owner(pool: PgPool) {
+    let summary = leads::service::convert_lead(&pool, LeadId(1), pilot())
+        .await
+        .unwrap();
+    let deal = deals::db::get(&pool, summary.deal_id.unwrap()).await.unwrap();
+    let lead = leads::db::get(&pool, LeadId(1)).await.unwrap();
+    assert_eq!(deal.owner_id, lead.owner_id);
+}
 ```
 
 **Why the lead's owner and not the caller?** "A rep's lead becomes that rep's opportunity" is how
@@ -209,22 +234,23 @@ clicks "convert" for a rep, the deal should still land in the rep's pipeline. Bo
 business rules. The point is that it's a *decision*, written down and tested, not an accident of
 which variable was in scope.
 
-**Why does `Lead::convert` get the owner from outside?** It's pure domain logic with unit tests
-(Lab 19). Pure functions don't look things up, so callers pass everything in. That's why
-`ConversionIds` exists in the first place, and the owner is one more "value the new records need".
-Update the unit tests that construct `ConversionIds` with `owner: UserId(1)`.
-
-If your Lab 31 `convert_lead` inserts the deal through `deals::db::insert(&mut *tx, &NewDeal { .. })`
-built from the converted `Deal`, carry `owner_id` across there too. The compiler will point at
-every `NewDeal { .. }` literal that lacks it.
+**Why does the owner go into `ConversionPlan`?** `plan_conversion` is the pure, unit-tested
+place (Lab 31) that decides *everything* a conversion will create. If `convert_lead` read
+`lead.owner_id` itself, the rule "the lead's owner owns the deal" would live in the
+transaction code, where no unit test sees it. In the plan, a two-line unit test can check it.
 
 ### Activities
 
 ```rust
-// src/activities/db.rs
+// src/activities/model.rs: Activity gains
+pub created_by: UserId,
+
+// src/activities/db.rs: ActivityRow gains `created_by: i64`, TryFrom sets
+// `created_by: UserId(row.created_by)`, every SELECT/RETURNING on activities lists created_by
+// (insert, list_for_subject, both queries in page_for_subject), and insert gains the author:
 pub async fn insert(
-    db: impl PgExecutor<'_>,
-    new: &NewActivity,          // or your existing parameters
+    pool: &PgPool,
+    new: &NewActivity,
     created_by: UserId,
 ) -> Result<Activity, CrmError>
 // SQL: INSERT INTO activities (subject_type, subject_id, kind, details, summary, occurred_at, created_by)
@@ -232,16 +258,24 @@ pub async fn insert(
 ```
 
 ```rust
-async fn log_activity(
+async fn create_activity(
     user: AuthUser,
     State(state): State<AppState>,
     AppJson(req): AppJson<CreateActivityRequest>,
 ) -> Result<(StatusCode, Json<ActivityResponse>), ApiError> {
-    // ... existing validation and subject-exists check ...
+    let new = NewActivity {
+        subject: parse_subject(&req.subject)?,
+        kind: req.kind,
+        summary: req.summary,
+        occurred_at: req.occurred_at.unwrap_or_else(Utc::now),
+    };
     let activity = activities::db::insert(&state.pool, &new, user.id).await?;
     Ok((StatusCode::CREATED, Json(ActivityResponse::from(&activity))))
 }
 ```
+
+(All of the above, with Steps 10–12, ran green against Postgres on top of the Lab 33 code:
+`cargo clippy --all-targets -- -D warnings` clean, and every unit, `tests/api` and `tests/db` test passing.)
 
 ### The "no owner in DTOs" rule
 

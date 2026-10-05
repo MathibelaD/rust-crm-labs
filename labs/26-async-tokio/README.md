@@ -198,8 +198,9 @@ In `src/main.rs`:
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
-    // … storage as before …
-    rust_crm::cli::run(storage, Duration::from_secs(args.autosave_secs));
+    let autosave_every = Duration::from_secs(args.autosave_secs);
+    let storage = build_storage(args);
+    rust_crm::cli::run(storage, autosave_every);
     Ok(())
 }
 ```
@@ -208,10 +209,10 @@ async fn main() -> anyhow::Result<()> {
 
 ```text
 warning: unused implementer of `Future` that must be used
-  --> src/main.rs:35:5
+  --> src/main.rs:46:5
    |
-35 |     rust_crm::cli::run(storage, Duration::from_secs(args.autosave_secs));
-   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+46 |     rust_crm::cli::run(storage, autosave_every);
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
    |
    = note: futures do nothing unless you `.await` or poll them
    = note: `#[warn(unused_must_use)]` (part of `#[warn(unused)]`) on by default
@@ -225,7 +226,7 @@ floating promise). In Rust it does nothing at all.
 Now make the laziness visible, then fix it:
 
 ```rust
-    let future = rust_crm::cli::run(storage, Duration::from_secs(args.autosave_secs));
+    let future = rust_crm::cli::run(storage, autosave_every);
     println!("(future created; nothing has run yet)");
     future.await
 ```
@@ -234,7 +235,8 @@ Now make the laziness visible, then fix it:
 (future created; nothing has run yet)
 Rust CRM v0.1.0
 Type 'help' for a list of commands.
-Loaded 0 companies, 0 contacts, 0 deals, 0 leads.
+Storage: JSON file crm-data.json
+Loaded 0 companies, 0 contacts, 0 deals, 0 leads
 crm>
 ```
 
@@ -242,7 +244,7 @@ The banner comes **after** our message, even though `run` was called first. Once
 it, simplify to the line you'll keep:
 
 ```rust
-    rust_crm::cli::run(storage, Duration::from_secs(args.autosave_secs)).await
+    rust_crm::cli::run(storage, autosave_every).await
 ```
 
 ### What `#[tokio::main]` does
@@ -267,16 +269,18 @@ the **current** thread, parking the thread while it's `Pending`, until it's `Rea
 
 ### It compiles… but nothing is async yet
 
-`run` is `async`, but its body still calls `io::stdin().read_line`, which **blocks**. So far we
-have only *wrapped* blocking code in a future. The autosave is still an OS thread. The next steps
-replace every blocking piece, one at a time.
+`run` is `async`, but `repl` (Lab 25) and the `prompt`/`prompt_optional` helpers still call
+`io::stdin().read_line`, which **blocks**. So far we have only *wrapped* blocking code in a
+future. The autosave is still an OS thread. The next steps replace every blocking piece, one at a
+time.
 
 ---
 
 ## Step 3 — `Input`: one owner of standard input
 
-The REPL and every `prompt(...)` call read stdin with blocking `read_line`. We need an async
-version: "give me the next line; until it arrives, let other tasks run."
+The REPL (`repl`) and every `prompt(...)`/`prompt_optional(...)` call read stdin with the blocking
+`io::stdin().read_line` in `src/cli/mod.rs`. We need an async version: "give me the next line;
+until it arrives, let other tasks run."
 
 ### Why not `tokio::io::stdin()`?
 
@@ -372,8 +376,8 @@ Things to notice:
 Now the commands. In Lab 25 the REPL did this:
 
 ```rust
-let mut data = lock(state);                   // lock …
-let result = execute(&mut data.crm, command); // … while execute PROMPTS the user
+let mut data = lock(state);                             // lock …
+let result = commands::execute(&mut data.crm, command); // … while execute PROMPTS the user
 ```
 
 So the lock was held while you typed (Experiment 3). With async prompts it gets worse. Let's see
@@ -387,7 +391,7 @@ why with a 🟡 experiment. It's the most common mistake people make when moving
 >             // 🟡 lock first, then prompt
 >             let mut data = state.lock().unwrap();
 >             let name = input.prompt("Name: ").await?;
->             let website = optional(input.prompt("Website (blank for none): ").await?);
+>             let website = optional(input.prompt("Website (optional): ").await?);
 >             let id = data.crm.add_company(name, website)?;
 >             data.dirty = true;
 >             println!("Added company {id}");
@@ -399,19 +403,20 @@ requires it to be `Send`. But `cargo clippy` catches it:
 
 ```text
 warning: this `MutexGuard` is held across an await point
-  --> src/cli/commands.rs:93:17
+  --> src/cli/commands.rs:90:17
    |
-93 |             let mut data = state.lock().unwrap();
+90 |             let mut data = state.lock().unwrap();
    |                 ^^^^^^^^
    |
    = help: consider using an async-aware `Mutex` type or ensuring the `MutexGuard` is dropped before calling `await`
 note: these are all the await points this lock is held through
-  --> src/cli/commands.rs:94:47
+  --> src/cli/commands.rs:91:47
    |
-94 |             let name = input.prompt("Name: ").await?;
+91 |             let name = input.prompt("Name: ").await?;
    |                                               ^^^^^
-95 |             let website = optional(input.prompt("Website (blank for none): ").await?);
-   |                                                                               ^^^^^
+92 |             let website = optional(input.prompt("Website (optional): ").await?);
+   |                                                                         ^^^^^
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#await_holding_lock
    = note: `#[warn(clippy::await_holding_lock)]` on by default
 ```
 
@@ -457,28 +462,29 @@ inside it.** Try:
 >             // 🟡 prompt *inside* the locked section
 >             let id = write_crm(state, |crm| {
 >                 let name = input.prompt("Name: ").await?;
->                 let website = optional(input.prompt("Website (blank for none): ").await?);
+>                 let website = optional(input.prompt("Website (optional): ").await?);
 >                 crm.add_company(name, website)
 >             })?;
 > ```
 
 ```text
 error[E0728]: `await` is only allowed inside `async` functions and blocks
-  --> src/cli/commands.rs:94:51
+  --> src/cli/commands.rs:91:51
    |
-93 |             let id = write_crm(state, |crm| {
+90 |             let id = write_crm(state, |crm| {
    |                                       ----- this is not `async`
-94 |                 let name = input.prompt("Name: ").await?;
+91 |                 let name = input.prompt("Name: ").await?;
    |                                                   ^^^^^ only allowed inside `async` functions and blocks
 ```
 
-That's the design working. "Never hold the lock across an `.await`" is now enforced by the
-compiler, with no reviewer or lint needed. The guard can't escape the helper (it's a local
+(and the same for the second `.await`). That's the design working. "Never hold the lock across
+an `.await`" is now enforced by the compiler, with no reviewer or lint needed. The guard can't escape the helper (it's a local
 there), and nothing inside can suspend.
 
 `write_crm` marks the data dirty even if the closure returns an `Err`. That might cause an
 unnecessary save. That's harmless, and it keeps the helper simple. (`Command::is_mutating()` is
-no longer needed: delete it when the compiler tells you it's unused.)
+no longer needed: delete it, the whole `impl Command<'_>` block in `parser.rs`, when the compiler
+tells you it's unused.)
 
 ---
 
@@ -488,13 +494,19 @@ no longer needed: delete it when the compiler tells you it's unused.)
 > state and the `Input` instead of `&mut Crm`:
 
 ```rust
+use std::fmt::Display;
 use std::sync::Mutex;
 
+use chrono::{DateTime, NaiveDateTime, Utc};
+
 use super::autosave::{AppData, read_crm, write_crm};
+use super::error::CliError;
 use super::input::Input;
+// ... the other imports unchanged
 ```
 
 ```rust
+/// Runs one command. Printing happens here; errors are returned.
 pub(crate) async fn execute(
     state: &Mutex<AppData>,
     input: &mut Input,
@@ -502,42 +514,47 @@ pub(crate) async fn execute(
 ) -> anyhow::Result<()> {
     match command {
         Command::Help => print_help(),
-        Command::Version => println!("Rust CRM v{}", env!("CARGO_PKG_VERSION")),
+        Command::Version => println!("{APP_NAME} v{}", env!("CARGO_PKG_VERSION")),
         Command::Quit | Command::Save => {} // handled by the REPL loop
-        Command::Company(cmd) => company(state, input, cmd).await?,
+        Command::Stats => read_crm(state, print_stats),
+        Command::Company(command) => company(state, input, command).await?,
         // Not converted yet: that's Your Turn 1.
         Command::Contact(_) | Command::Deal(_) | Command::Lead(_) | Command::LogActivity { .. } => {
             anyhow::bail!("this command is being converted to async (Lab 26, Your Turn 1)")
         }
-        Command::Pipeline => read_crm(state, |crm| {
-            for row in crm.pipeline_report() {
-                println!(
-                    "{:<14} {:>3} {:>14}",
-                    row.stage.to_string(),
-                    row.count,
-                    row.total.to_string()
-                );
-            }
-        }),
+        Command::Pipeline => read_crm(state, print_pipeline),
         Command::AddNote { subject, body } => {
             let id = write_crm(state, |crm| crm.add_note(subject, body, Utc::now()))?;
-            println!("Added note {id}");
+            println!("Added note {id} to {subject}");
         }
-        Command::History { subject } => {
-            read_crm(state, |crm| print_history(crm, subject, usize::MAX))
-        }
+        Command::History { subject } => read_crm(state, |crm| {
+            crm.check_subject(subject)?;
+            let history = crm.history(subject);
+            if history.is_empty() {
+                println!("No history for {subject} yet.");
+            }
+            for item in &history {
+                println!("{item}");
+            }
+            Ok::<(), CrmError>(())
+        })?,
     }
     Ok(())
 }
 ```
 
-(Your `pipeline`/`note`/`history` printing may look different. Keep your own formatting and just
-wrap it in `read_crm`/`write_crm`.)
+`print_stats` and `print_pipeline` already take a `&Crm`, so they can be handed to `read_crm`
+as they are: a function item is a closure too. The note and history code is Lab 20's, moved
+into `write_crm`/`read_crm`.
 
-Why `anyhow::Result<()>` now? `execute` can fail in two different ways: a domain error
-(`CrmError`, as before) **or** an input error from `Input::prompt` (end of input, I/O). `anyhow`
-holds either, and `?` converts both. The REPL still prints `Error: {e}`, and for a `CrmError` the
-message is exactly the same as before.
+Why `anyhow::Result<()>` now, instead of Lab 22's `Result<(), CliError>`? `execute` can now fail
+in a third way. Besides a usage error (`CliError::Usage`) and a domain error (`CrmError`, which
+`CliError::Domain` wraps), there's an input error from `Input::prompt` (end of input, I/O).
+`anyhow` holds any of them, and `?` converts each one: a `CliError`, a `CrmError` or a
+`ValidationError` all go straight into `anyhow::Error`. `CliError` doesn't go away: the parser
+still returns it, and handlers still build `CliError::Usage(…)` for bad input. The REPL prints
+`Error: {e:#}`: the `#` makes `anyhow` print the whole cause chain, `outer: cause: root`, exactly
+like Lab 22's `error_chain`, so every message is the same as before.
 
 The company commands, converted:
 
@@ -545,52 +562,60 @@ The company commands, converted:
 async fn company(
     state: &Mutex<AppData>,
     input: &mut Input,
-    cmd: CompanyCommand,
+    command: CompanyCommand,
 ) -> anyhow::Result<()> {
-    match cmd {
+    match command {
         CompanyCommand::Add => {
             // 1. Talk to the human. No lock held: this can take minutes.
             let name = input.prompt("Name: ").await?;
-            let website = optional(input.prompt("Website (blank for none): ").await?);
+            let website = optional(input.prompt("Website (optional): ").await?);
             // 2. Touch the CRM. Lock held for microseconds.
             let id = write_crm(state, |crm| crm.add_company(name, website))?;
             println!("Added company {id}");
         }
-        CompanyCommand::List => read_crm(state, |crm| {
-            let companies = crm.list_companies(&CompanyFilter::default());
+        CompanyCommand::List { filter } => read_crm(state, |crm| {
+            let companies = crm.list_companies(&filter);
             if companies.is_empty() {
-                println!("No companies yet.");
-            }
-            for c in companies {
-                println!("{c}");
+                println!("No companies match.");
+            } else {
+                print_table(COMPANY_HEADER, &companies);
             }
         }),
         CompanyCommand::Show { id } => read_crm(state, |crm| {
-            let company = crm.companies.get(id).ok_or(CrmError::NotFound {
-                entity: "company",
-                id: id.0,
-            })?;
-            println!("{company}");
-            for c in crm.contacts_of(id) {
-                println!("  {c}");
+            let company = crm.company(id)?;
+            print_table(COMPANY_HEADER, &[company]);
+            println!();
+            let contacts = crm.contacts_of(id);
+            if contacts.is_empty() {
+                println!("No contacts yet.");
+            } else {
+                print_table(CONTACT_HEADER, &contacts);
             }
-            print_history(crm, Subject::Company(id), 5);
+            print_recent_history(crm, Subject::Company(id));
             Ok::<(), CrmError>(())
         })?,
         CompanyCommand::Stage { id, lifecycle } => {
             write_crm(state, |crm| crm.set_lifecycle(id, lifecycle))?;
-            println!("Company {id} is now {lifecycle}");
+            println!("Company {id} is now {lifecycle}.");
         }
         CompanyCommand::Delete { id } => {
-            let removed = write_crm(state, |crm| crm.remove_company(id))?;
-            println!("Deleted company {id} ({})", removed.name);
+            let company = write_crm(state, |crm| crm.remove_company(id))?;
+            print_deleted("company", &company);
         }
     }
     Ok(())
 }
+
+/// Blank means `None`. (`prompt_optional` did the reading too; now `Input` reads.)
+fn optional(answer: String) -> Option<String> {
+    Some(answer).filter(|s| !s.is_empty())
+}
 ```
 
-(`optional` is the "blank means `None`" helper you've had since Lab 14. Use yours.)
+The bodies are your Lab 14–20 code: the same prompts, `print_table`, `print_deleted` and
+`print_recent_history`. Only *where* the CRM comes from changed. `optional` is new: Lab 20's
+`prompt_optional` both read the line and turned blank into `None`, and now `Input` does the
+reading.
 
 Two details:
 
@@ -604,22 +629,38 @@ Two details:
 
 ### The compiler's to-do list
 
-Your old blocking command handlers (contacts, deals, leads, activities) and the old blocking
-`prompt` function are now unused. `cargo check` lists them:
+Your old blocking command handlers (contacts, deals, leads, activity logging, and their helpers)
+and the old blocking `prompt`/`prompt_optional` helpers in `mod.rs` are now unused. Once `run` is
+rewired (Step 7), `cargo check` lists them:
 
 ```text
+warning: function `prompt_optional` is never used
+   --> src/cli/mod.rs:118:4
 warning: function `prompt` is never used
-  --> src/cli/mod.rs:25:15
+   --> src/cli/mod.rs:123:4
 warning: function `contact` is never used
-   --> src/cli/commands.rs:166:4
+   --> src/cli/commands.rs:134:4
 warning: function `deal` is never used
-   --> src/cli/commands.rs:244:4
+   --> src/cli/commands.rs:182:4
 warning: function `lead` is never used
-   --> src/cli/commands.rs:277:4
-… (trimmed)
+   --> src/cli/commands.rs:218:4
+warning: function `log_activity` is never used
+   --> src/cli/commands.rs:274:4
+warning: function `parse_datetime` is never used
+   --> src/cli/commands.rs:317:4
+warning: function `parse_contact_ids` is never used
+   --> src/cli/commands.rs:330:4
+warning: function `update_contact` is never used
+   --> src/cli/commands.rs:366:4
+warning: function `read_company_id` is never used
+   --> src/cli/commands.rs:384:4
+warning: method `is_mutating` is never used
+  --> src/cli/parser.rs:65:19
 ```
 
-That's your Your Turn 1 checklist. Leave them for now.
+Delete `is_mutating` now (Step 4). The rest is your Your Turn 1 checklist. Leave them for now.
+(`cargo test` won't build yet either: the unit test `unknown_ids_are_not_found` at the bottom of
+`commands.rs` still calls the old `execute(&mut crm, command)`. That's Your Turn 1 too.)
 
 ---
 
@@ -676,26 +717,26 @@ pub(crate) fn spawn_autosave(
 
 ```text
 error: future cannot be sent between threads safely
-   --> src/cli/autosave.rs:64:5
+   --> src/cli/autosave.rs:69:5
     |
- 64 | /     tokio::spawn(async move {
- 65 | |         let mut ticker = time::interval_at(Instant::now() + every, every);
- 66 | |         loop {
+ 69 | /     tokio::spawn(async move {
+ 70 | |         let mut ticker = time::interval_at(Instant::now() + every, every);
+ 71 | |         loop {
 ...   |
- 78 | |     })
+ 83 | |     })
     | |______^ future created by async block is not `Send`
     |
-    = help: within `{async block@src/cli/autosave.rs:64:18: 64:28}`, the trait `Send` is not implemented for `std::sync::MutexGuard<'_, AppData>`
+    = help: within `{async block@src/cli/autosave.rs:69:18: 69:28}`, the trait `Send` is not implemented for `std::sync::MutexGuard<'_, AppData>`
 note: future is not `Send` as this value is used across an await
-   --> src/cli/autosave.rs:73:13
+   --> src/cli/autosave.rs:78:13
     |
- 68 |               let mut data = state.lock().unwrap();
+ 73 |               let mut data = state.lock().unwrap();
     |                   -------- has type `std::sync::MutexGuard<'_, AppData>` which is not `Send`
 ...
- 73 | /             tokio::select! {
- 74 | |                 _ = ticker.tick() => {}
- 75 | |                 _ = &mut shutdown => break,
- 76 | |             }
+ 78 | /             tokio::select! {
+ 79 | |                 _ = ticker.tick() => {}
+ 80 | |                 _ = &mut shutdown => break,
+ 81 | |             }
     | |_____________^ await occurs here, with `mut data` maybe used later
 note: required by a bound in `tokio::spawn`
    --> ~/.cargo/registry/src/index.crates.io-…/tokio-1.53.2/src/task/spawn.rs:176:21
@@ -705,6 +746,7 @@ note: required by a bound in `tokio::spawn`
 175 |     where
 176 |         F: Future + Send + 'static,
     |                     ^^^^ required by this bound in `spawn`
+    = note: this error originates in the macro `$crate::select` which comes from the expansion of the macro `tokio::select` (in Nightly builds, run with -Z macro-backtrace for more info)
 ```
 
 **Read the error with the Step 1 picture in mind.**
@@ -810,16 +852,24 @@ through it:
 The three `spawn_autosave` tests from Lab 25 (Your Turn 2) used `std::sync::mpsc` and
 `JoinHandle::join`. They don't compile anymore. **Delete them and `CountingStorage` for now.**
 They're in Lab 25's solutions.md, and Your Turn 3 brings them back as async tests. Keep
-`lock_recovers_from_a_poisoned_mutex`. It needs `use std::thread;` inside `mod tests`, now that
-the module no longer imports `thread` at the top.
+`lock_recovers_from_a_poisoned_mutex` and the small `state(dirty)` helper it uses. The test needs
+`use std::thread;` inside `mod tests`, now that the module no longer imports `thread` at the top.
 
 ---
 
 ## Step 7 — The async REPL, with Ctrl-C
 
-> 🟢 **FOLLOW ALONG**: the new `run` and `repl` in `src/cli/mod.rs`:
+> 🟢 **FOLLOW ALONG**: the new `run` and `repl` in `src/cli/mod.rs` (`APP_NAME`, `PAGE_SIZE`,
+> `count` and, until Your Turn 1, the old `prompt`/`prompt_optional` helpers stay as they are):
 
 ```rust
+mod autosave;
+mod commands;
+mod error;
+mod input;
+mod parser;
+
+use std::io::{self, Write}; // only for the old prompt helpers; goes away in Your Turn 1
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -827,28 +877,27 @@ use anyhow::Context;
 use tokio::sync::oneshot;
 use tokio::task;
 
+use crate::errors::error_chain;
 use crate::storage::Storage;
-
-mod autosave;
-mod commands;
-mod input;
-mod parser;
-
 use autosave::{AppData, save_if_dirty, spawn_autosave};
-use commands::execute;
 use input::Input;
-use parser::{Command, parse_command};
+use parser::Command;
 
+/// Runs the interactive CRM until the user quits (or stdin closes).
 pub async fn run(storage: Arc<dyn Storage>, autosave_every: Duration) -> anyhow::Result<()> {
-    let crm = storage.load().context("could not load CRM data")?;
-    println!("Rust CRM v{}", env!("CARGO_PKG_VERSION"));
+    println!("{APP_NAME} v{}", env!("CARGO_PKG_VERSION"));
     println!("Type 'help' for a list of commands.");
+    println!("Storage: {}", storage.describe());
+
+    let crm = storage
+        .load()
+        .context("refusing to start, so the data file is not overwritten")?;
     println!(
-        "Loaded {} companies, {} contacts, {} deals, {} leads.",
-        crm.companies.len(),
-        crm.contacts.len(),
-        crm.deals.len(),
-        crm.leads.len()
+        "Loaded {}, {}, {}, {}",
+        count(crm.companies.len(), "company", "companies"),
+        count(crm.contacts.len(), "contact", "contacts"),
+        count(crm.deals.len(), "deal", "deals"),
+        count(crm.leads.len(), "lead", "leads"),
     );
 
     let state = Arc::new(Mutex::new(AppData { crm, dirty: false }));
@@ -878,7 +927,8 @@ async fn repl(
     storage: &Arc<dyn Storage>,
     input: &mut Input,
 ) -> anyhow::Result<usize> {
-    let mut commands_run = 0;
+    let mut count = 0;
+
     loop {
         let line = tokio::select! {
             line = input.read_line("crm> ") => line?,
@@ -889,36 +939,34 @@ async fn repl(
             }
         };
         let Some(line) = line else {
+            println!();
             break; // Ctrl-D / end of input
         };
-        let command = match parse_command(&line) {
-            Ok(Some(command)) => command,
+
+        let result = match parser::parse_command(&line) {
             Ok(None) => continue,
-            Err(e) => {
-                println!("Error: {e}");
-                continue;
-            }
-        };
-        commands_run += 1;
-        match command {
-            Command::Quit => break,
-            Command::Save => {
+            Ok(Some(Command::Quit)) => break,
+            Ok(Some(Command::Save)) => {
                 let state = Arc::clone(state);
                 let storage = Arc::clone(storage);
                 match task::spawn_blocking(move || save_if_dirty(&state, &*storage)).await? {
                     Ok(true) => println!("Saved."),
                     Ok(false) => println!("Nothing to save."),
-                    Err(e) => println!("Error: {:#}", anyhow::Error::from(e)),
+                    Err(e) => println!("Error: {}", error_chain(&e)),
                 }
+                Ok(())
             }
-            command => {
-                if let Err(e) = execute(state, input, command).await {
-                    println!("Error: {e}");
-                }
-            }
+            Ok(Some(command)) => commands::execute(state, input, command).await,
+            Err(e) => Err(e.into()),
+        };
+        count += 1;
+
+        if let Err(e) = result {
+            // `{:#}` prints the whole cause chain, like `error_chain`.
+            println!("Error: {e:#}");
         }
     }
-    Ok(commands_run)
+    Ok(count)
 }
 ```
 
@@ -937,13 +985,19 @@ What changed, and why:
   (Tokio's docs say so): no line is lost. This is exactly why the line comes through a channel.
 - **`repl` takes `&Arc<…>` now, not `&Mutex<…>`**: the `Save` arm has to *clone* the `Arc`s
   to move them into `spawn_blocking`. A `&Mutex` can't be turned back into an `Arc`.
-- `execute(state, input, command)`: `state` is `&Arc<Mutex<AppData>>`, and deref coercion turns
-  it into the `&Mutex<AppData>` that `execute` wants.
+- `commands::execute(state, input, command)`: `state` is `&Arc<Mutex<AppData>>`, and deref
+  coercion turns it into the `&Mutex<AppData>` that `execute` wants.
+- **The `match` keeps Lab 25's shape**: one `result` per command, counted, and printed if it's an
+  `Err`. A parse error (`CliError`) becomes an `anyhow::Error` with `e.into()`, so both kinds of
+  error are printed by the same `{e:#}`.
+- **`repl` returns `anyhow::Result<usize>` now.** Reading a line can fail (`line?`), and so can
+  the `Save` arm's `.await?` on the blocking task. Lab 25's structure pays off: `?` only leaves
+  `repl`, and `run` still stops the autosave task before it looks at `result`.
 
 `src/main.rs` keeps `#[tokio::main]` and ends with:
 
 ```rust
-    rust_crm::cli::run(storage, Duration::from_secs(args.autosave_secs)).await
+    rust_crm::cli::run(storage, autosave_every).await
 ```
 
 ```bash
@@ -970,24 +1024,30 @@ Then: `grep -c '"name"' lab26-demo.json`
 ```text
 Rust CRM v0.1.0
 Type 'help' for a list of commands.
-Loaded 0 companies, 0 contacts, 0 deals, 0 leads.
+Storage: JSON file lab26-demo.json
+Loaded 0 companies, 0 contacts, 0 deals, 0 leads
 crm> company add
 Name: Acme Corp
-Website (blank for none): https://acme.example
+Website (optional): https://acme.example
 Added company #1
 crm> company add
 Name: Globex
-Website (blank for none):
+Website (optional):
 Added company #2
 crm> company list
-#1 Acme Corp                [prospect] https://acme.example
-#2 Globex                   [prospect]
+ID   NAME                 STAGE     WEBSITE
+#1   Acme Corp            prospect  https://acme.example
+#2   Globex               prospect  -
 crm> contact add
 Error: this command is being converted to async (Lab 26, Your Turn 1)
 crm> company stage 1 customer
-Company #1 is now customer
+Company #1 is now customer.
 crm> company show 1
-#1 Acme Corp                [customer] https://acme.example
+ID   NAME                 STAGE     WEBSITE
+#1   Acme Corp            customer  https://acme.example
+
+No contacts yet.
+  No history yet.
 crm> save
 Saved.
 crm> ^C
@@ -1001,7 +1061,7 @@ $ grep -c '"name"' lab26-demo.json
 ```
 
 The `^C` is your terminal echoing the keypress. The program exits **immediately** after
-"Goodbye!". (The `Loaded …` line and the table formatting come from your own Lab 21 message and
+"Goodbye!". (The banner lines and the table formatting come from your own Lab 24 banner and
 `Display` impls, so wording and spacing may differ.)
 Whether `save` prints `Saved.` or `Nothing to save.` depends on whether a 2-second tick got
 there first. Both are correct. Try the `save` command right after a change to see `Saved.`.
@@ -1087,7 +1147,7 @@ cancel-safe?" is a question to ask every time you write `select!`.
 > Run with `--autosave-secs 1 --storage memory`. Add a company, wait a second, then type
 > `company list`. How long does the list take to appear?
 
-About **three seconds**. With `current_thread` there's exactly one thread polling futures. The
+Up to **three seconds**. With `current_thread` there's exactly one thread polling futures. The
 autosave task is sitting in `std::thread::sleep` on that thread without ever returning
 `Pending`, so the REPL future can't be polled, even though your line is already waiting in the
 channel. On the default multi-threaded runtime the effect is smaller (another worker picks up
@@ -1124,18 +1184,20 @@ pipe that stayed open, it took 8 seconds to exit instead of 1.) Restore the thre
 
 ```text
 error[E0521]: borrowed data escapes outside of function
-   --> src/cli/mod.rs:100:23
-    |
- 70 |     state: &Arc<Mutex<AppData>>,
-    |     -----  - let's call the lifetime of this reference `'1`
-    |     |
-    |     `state` is a reference that is only valid in the function body
+  --> src/cli/mod.rs:95:23
+   |
+70 |     state: &Arc<Mutex<AppData>>,
+   |     -----  - let's call the lifetime of this reference `'1`
+   |     |
+   |     `state` is a reference that is only valid in the function body
+71 |     storage: &Arc<dyn Storage>,
+   |     ------- `storage` declared here, outside of the function body
 ...
-100 |                 match task::spawn_blocking(|| save_if_dirty(state, &**storage)).await? {
-    |                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-    |                       |
-    |                       `state` escapes the function body here
-    |                       argument requires that `'1` must outlive `'static`
+95 |                 match task::spawn_blocking(|| save_if_dirty(state, &**storage)).await? {
+   |                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |                       |
+   |                       `state` escapes the function body here
+   |                       argument requires that `'1` must outlive `'static`
 ```
 
 (and the same for `storage`). *"But I `.await` it right there!"* Think about cancellation: if
@@ -1163,34 +1225,45 @@ another reason for them. Put the clones back.
 - [ ] each converted handler has the shape `async fn contact(state: &Mutex<AppData>, input: &mut Input, cmd: ContactCommand<'_>) -> anyhow::Result<()>`
       (same for `deal`, `lead`, and an `async fn log_activity(state, input, subject)`)
 - [ ] all prompting happens **outside** `read_crm`/`write_crm`
-- [ ] `contact update <id>` reports `Error: contact #<id> not found` **before** asking any
-      questions if the contact doesn't exist, *and* still copes if the contact disappears while
-      the user is typing (think about what can happen between two lock acquisitions)
-- [ ] the old blocking `prompt` function is deleted; no dead-code warnings remain
+- [ ] `contact update <id>` still reports `Error: no contact with id <id>` **before** asking any
+      questions if the contact doesn't exist (your Lab 14 version did that with its
+      `Editing …` line; keep it), *and* still copes if the contact disappears while the user is
+      typing (think about what can happen between two lock acquisitions). Lab 14's
+      `Crm::update_contact` already looks the contact up again and checks for a duplicate email:
+      call it inside **one** `write_crm`, where nothing can change between the check and the
+      update
+- [ ] the old blocking `prompt`/`prompt_optional` helpers in `mod.rs` are deleted (with the
+      `std::io` import); no dead-code warnings remain
+- [ ] the unit test `unknown_ids_are_not_found` in `commands.rs` compiles and passes again, as a
+      `#[tokio::test]` (it needs an `Input` that never touches the real stdin: see the hint)
 - [ ] `cargo clippy --all-targets -- -D warnings` is clean (so no `await_holding_lock`)
 - [ ] this script produces the output below:
-      `printf 'company add\nAcme Corp\nhttps://acme.example\ncontact add\nAda Lovelace\nada@acme.example\n555-0100\n1\ncontact update 1\n\n\n555-0199\ndeal add\n1\nAnnual licence\n12000\ndeal move 1 proposal\nlead add\nLinus\nlinus@example.org\nInitech\nreferral\nlead qualify 1\nlead convert 1\ny\nPilot\n2500\nactivity log deal:1\ncall\n15\nIntro call\ncontact list\nquit\n' | cargo run -q -- --storage memory`
+      `printf 'company add\nAcme Corp\nhttps://acme.example\ncontact add\nAda Lovelace\nada@acme.example\n555-0100\n1\ncontact update 1\n\nada.lovelace@acme.example\n\ndeal add\n1\nAnnual licence\n12000\ndeal move 1 proposal\nlead add\nLinus\nlinus@example.org\nInitech\nreferral\n\nlead qualify 1\nlead convert 1\ny\nPilot\n2500\nactivity log deal:1\ncall\n15\nIntro call\n\ncontact list\nquit\n' | cargo run -q -- --storage memory`
 
 ```text
 Rust CRM v0.1.0
 Type 'help' for a list of commands.
-Loaded 0 companies, 0 contacts, 0 deals, 0 leads.
-crm> Name: Website (blank for none): Added company #1
-crm> Name: Email: Phone (blank for none): Company id (blank for none): Added contact #1
-crm> New name (blank to keep): New email (blank to keep): New phone (blank to keep): Updated contact #1
-crm> Company id: Title: Value: Added deal #1
+Storage: in memory (nothing will be saved)
+Loaded 0 companies, 0 contacts, 0 deals, 0 leads
+crm> Name: Website (optional): Added company #1
+crm> Name: Email: Phone (optional): Company id (blank for none): Added contact #1
+crm> Editing Ada Lovelace <ada@acme.example>
+Name (blank to keep): Email (blank to keep): Phone (blank to keep): Updated contact #1
+crm> Company id: Title: Value (e.g. 1250.50): Added deal #1
 crm> Deal #1 moved to proposal
-crm> Name: Email: Company name (blank for none): Source (website/referral/event/cold_outreach/other): Added lead #1
-crm> Lead #1 qualified
-crm> Create a deal? (y/n): Deal title: Deal value: Converted lead #1: company #2, contact #2, deal #2
-crm> Kind (call/email/meeting): Minutes: Summary: Logged activity #1
-crm> #1 Ada Lovelace         ada@acme.example             555-0199 (company #1)
-#2 Linus                linus@example.org            (company #2)
-crm> Goodbye! (11 commands this session)
+crm> Name: Email: Company name (blank for none): Source (website/referral/event/cold_outreach/other, blank for other): Notes (blank for none): Added lead #1
+crm> Lead #1 is qualified
+crm> Create a deal? (y/n): Deal title: Deal value (e.g. 1250.50): Converted lead #1: company #2, contact #2, deal #2
+crm> Kind (call/email/meeting): Duration in minutes: Summary: When (YYYY-MM-DD HH:MM, UTC; blank for now): Logged activity #1 on deal:1
+crm> ID   NAME                 EMAIL                    PHONE          COMPANY
+#1   Ada Lovelace         ada.lovelace@acme.example 555-0100       #1
+#2   Linus                linus@example.org        -              #2
+Page 1 of 1 (2 matching)
+crm> Goodbye! (10 commands this session)
 ```
 
-(Prompts and messages are the reference implementation's. Yours come from your earlier labs, so
-compare behaviour, not spelling.)
+(The prompts and messages are the ones your earlier labs wrote; converting to async changes none
+of them. The input is piped, so what you type doesn't appear after the prompts.)
 
 > 🔵 **YOUR TURN 2 — Ctrl-C cancels the command, not the program**
 >
@@ -1209,7 +1282,7 @@ crm> company add
 Name: ^C
 Error: cancelled
 crm> company list
-No companies yet.
+No companies match.
 ```
 
 > 🔵 **YOUR TURN 3 — async tests for the autosave task**
@@ -1236,10 +1309,17 @@ No companies yet.
 <details><summary>Hint 2 (more specific)</summary>
 
 For `contact update`, use **two** short critical sections: `read_crm` first to check that the
-contact exists (fail fast), then the prompts, then `write_crm`, where you look the contact up
-**again** with `get_mut` and return `NotFound` if it's gone. Between the two locks, the autosave
+contact exists (fail fast, and get the label for `Editing …`), then the prompts, then
+`write_crm(state, |crm| crm.update_contact(id, name, email, phone))`. `Crm::update_contact` looks
+the contact up **again** and returns `NotFound` if it's gone. Between the two locks, the autosave
 task may run, and in Lab 27 another HTTP request could delete the contact. "Check, release,
 then act" always needs a re-check inside the second lock.
+
+For the test: give `Input` a second constructor, only for tests, that fills the channel with
+canned lines instead of starting the stdin thread:
+`#[cfg(test)] pub(crate) fn from_lines(lines: &[&str]) -> Self`. A `tokio::sync::mpsc::Sender`
+has a non-async `try_send`. Then `execute(&state, &mut input, command).await.unwrap_err()`, and
+`err.downcast_ref::<CrmError>()` gets the domain error back out of the `anyhow::Error`.
 
 </details>
 

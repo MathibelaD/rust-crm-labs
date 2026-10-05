@@ -181,12 +181,11 @@ is the container itself. Docker's port publishing (`-p 8080:8080`) forwards traf
 container's network interface, *not* its loopback, so a server bound to `127.0.0.1` inside a
 container is unreachable from outside. Nothing crashes. You just get `connection reset`.
 
-> 🟢 **FOLLOW ALONG**: open `config/production.toml` (from Lab 38) and make sure it contains
-> at least these values (keep anything else you already have):
+> 🟢 **FOLLOW ALONG**: open `config/production.toml` (from Lab 38) and check that it contains
+> these values. If you followed Lab 38, it already does, so there's nothing to change:
 
 ```toml
 [app]
-env = "production"
 log_format = "json"
 
 [server]
@@ -1029,9 +1028,10 @@ conditional on `github.event_name == 'push'`. For the cache, look up `cache-from
 
 <details><summary>Hint 4 (Your Turn 2)</summary>
 
-Write the architecture section by opening `src/lib.rs` and following `run()` from top to
-bottom: settings → telemetry → pool → migrations → router + state → worker + scheduler →
-serve → shutdown. That *is* your architecture.
+Write the architecture section by starting at `src/main.rs` and following the calls from top
+to bottom: settings (`config::load` + `validate`) → `run()` in `src/lib.rs` (telemetry) →
+`Application::build` in `src/startup.rs` (pool → migrations → state + router) →
+`run_until_stopped` (worker + scheduler → serve → shutdown). That *is* your architecture.
 
 </details>
 

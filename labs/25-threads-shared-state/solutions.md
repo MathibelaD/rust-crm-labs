@@ -13,8 +13,8 @@ The obvious place to add `save` is inside `execute`, next to the other commands.
 receives `&mut Crm`, which already comes **from inside the lock**:
 
 ```rust
-let mut data = state.lock().unwrap();       // lock held…
-let result = execute(&mut data.crm, command); // …while execute runs
+let mut data = state.lock().unwrap();                 // lock held…
+let result = commands::execute(&mut data.crm, command); // …while execute runs
 ```
 
 `execute` has no storage, and even if you passed it in, calling `save_if_dirty(state, …)` from
@@ -29,13 +29,14 @@ pub(crate) enum Command<'a> {
     Version,
     Quit,
     Save,
+    Stats,
     // … the rest unchanged
 }
 ```
 
 ```rust
-        ("quit" | "exit", _) => Command::Quit,
-        ("save", _) => Command::Save,
+        ["quit" | "exit", ..] => Command::Quit,
+        ["save", ..] => Command::Save,
 ```
 
 In `is_mutating`, `Save` joins the non-mutating group:
@@ -45,6 +46,7 @@ In `is_mutating`, `Save` joins the non-mutating group:
             | Command::Version
             | Command::Quit
             | Command::Save
+            | Command::Stats
             | Command::Pipeline
             | Command::History { .. } => false,
 ```
@@ -55,7 +57,11 @@ In `is_mutating`, `Save` joins the non-mutating group:
         Command::Quit | Command::Save => {} // handled by the REPL loop
 ```
 
-and add `save` to `print_help`.
+and add `save` to `print_help`, in the "Other:" group:
+
+```rust
+    println!("  save                        save now, without waiting for autosave");
+```
 
 ### `src/cli/mod.rs`
 
@@ -64,27 +70,31 @@ use autosave::{AppData, save_if_dirty, spawn_autosave};
 ```
 
 ```rust
-    let result = repl(&state, &*storage);
+    let commands_run = repl(&state, &*storage);
 ```
 
 ```rust
-fn repl(state: &Mutex<AppData>, storage: &dyn Storage) -> anyhow::Result<usize> {
+fn repl(state: &Mutex<AppData>, storage: &dyn Storage) -> usize {
     // …
-        if command == Command::Quit {
-            break;
-        }
-        if command == Command::Save {
-            // No lock here: save_if_dirty takes it itself.
-            match save_if_dirty(state, storage) {
-                Ok(true) => println!("Saved."),
-                Ok(false) => println!("Nothing to save."),
-                Err(e) => println!("Error: {:#}", anyhow::Error::from(e)),
+        let result = match parser::parse_command(&input) {
+            Ok(None) => continue,
+            Ok(Some(Command::Quit)) => break count,
+            Ok(Some(Command::Save)) => {
+                // No lock here: save_if_dirty takes it itself.
+                match save_if_dirty(state, storage) {
+                    Ok(true) => println!("Saved."),
+                    Ok(false) => println!("Nothing to save."),
+                    Err(e) => println!("Error: {}", error_chain(&e)),
+                }
+                Ok(())
             }
-            continue;
-        }
-        let mutating = command.is_mutating();
-        // … unchanged
+            Ok(Some(command)) => {
+                // … unchanged
 ```
+
+The arm prints its own outcome and evaluates to `Ok(())`, so `save` is counted like any other
+command, and a failed save doesn't print a second `Error:` line. A `StorageError` isn't a
+`CliError` anyway, so it couldn't flow into `result` without a conversion.
 
 **Why `&dyn Storage` and not `Arc<dyn Storage>` for `repl`?** `repl` only *uses* the storage
 while it runs. It doesn't need to keep a share alive after it returns, and it never sends it to
@@ -98,7 +108,7 @@ crm> save
 Nothing to save.
 crm> company add
 Name: Acme Corp
-Website (blank for none): https://acme.example
+Website (optional): https://acme.example
 Added company #1
 crm> save
 Saved.
@@ -135,7 +145,10 @@ mod tests {
     }
 
     fn state(dirty: bool) -> Arc<Mutex<AppData>> {
-        Arc::new(Mutex::new(AppData { crm: Crm::default(), dirty }))
+        Arc::new(Mutex::new(AppData {
+            crm: Crm::default(),
+            dirty,
+        }))
     }
 
     #[test]
@@ -154,7 +167,12 @@ mod tests {
         let storage = Arc::new(CountingStorage::default());
         let shared = state(true);
         let (tx, rx) = mpsc::channel();
-        let handle = spawn_autosave(shared.clone(), storage.clone(), Duration::from_secs(3600), rx);
+        let handle = spawn_autosave(
+            shared.clone(),
+            storage.clone(),
+            Duration::from_secs(3600),
+            rx,
+        );
         tx.send(()).unwrap();
         handle.join().unwrap();
         assert_eq!(storage.saves.load(Ordering::SeqCst), 1);

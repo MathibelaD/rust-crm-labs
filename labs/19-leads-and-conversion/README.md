@@ -642,8 +642,11 @@ pub struct ConversionSummary {
 }
 ```
 
-(`Company` and `Contact` need `PartialEq` for `Conversion` to derive it. They have it if you
-followed Lab 14/15. If not, add it to their derives.)
+(`Company` and `Contact` need `PartialEq` for `Conversion` to derive it, and Lab 14 only gave
+them `#[derive(Debug, Clone)]`. Add `PartialEq` to both derive lists now, in
+`src/companies/model.rs` and `src/contacts/model.rs`. Without it you get two E0369 errors,
+"binary operation `==` cannot be applied to type `Company`" (and `Contact`), pointing at the
+fields of `Conversion`.)
 
 Why does `convert` take **ids** instead of a `&mut Crm`? Because `Lead::convert` is *pure domain
 logic*. It decides **what** records a lead becomes. The `Crm` owns the id counters and the
@@ -1127,7 +1130,9 @@ pub(crate) enum LeadCommand {
 }
 ```
 
-Dispatch arm: `"lead" => Command::Lead(parse_lead(&args)?),`, and the sub-parser:
+Dispatch arm, in `parse_command`'s slice match next to the `deal` arm:
+`["lead", rest @ ..] => Command::Lead(parse_lead(rest)?),`. And the sub-parser, in the same
+whole-slice style as Lab 18's `parse_deal`:
 
 ```rust
 fn parse_lead(args: &[&str]) -> Result<LeadCommand, CrmError> {
@@ -1161,9 +1166,22 @@ Add a test next to your other parser tests:
     }
 ```
 
-In `src/cli/commands.rs`, route `Command::Lead(cmd) => lead(crm, cmd)?,` and add the handler.
-Like Lab 17, `prompt_optional` is a small helper that returns `None` for blank input. Use
-yours, or write it now:
+Three optional prompts in a row call for a helper. Until now, optional input used the
+`Some(prompt(..)).filter(|s| !s.is_empty())` idiom inline (Lab 14's `company add` and
+`contact add`). In `src/cli/mod.rs`, next to `prompt`, add:
+
+```rust
+/// Like `prompt`, but blank input means `None`.
+fn prompt_optional(label: &str) -> Option<String> {
+    Some(prompt(label)).filter(|s| !s.is_empty())
+}
+```
+
+and import it in `commands.rs` (`use super::{APP_NAME, PAGE_SIZE, prompt, prompt_optional};`).
+It's private to `cli`, like `prompt`, and `commands` can use it because a child module sees its
+parent's private items (Lab 13).
+
+In `src/cli/commands.rs`, route `Command::Lead(cmd) => lead(crm, cmd)?,` and add the handler:
 
 ```rust
 use crate::leads::LeadSource;
@@ -1221,7 +1239,13 @@ fn lead(crm: &mut Crm, cmd: LeadCommand) -> Result<(), CrmError> {
 ```
 
 `raw.parse()?` relies on your `FromStr for LeadSource` (Step 1 mini-task), so the type is
-inferred from the `match`'s other arm (`LeadSource::Other`). Add `lead …` to `print_help`.
+inferred from the `match`'s other arm (`LeadSource::Other`). Add a `Leads:` block to
+`print_help`, before `Other:`:
+
+```rust
+    println!("Leads:");
+    println!("  lead add | list | qualify <id> | convert <id>");
+```
 
 ---
 
@@ -1284,8 +1308,8 @@ quit
 ```text
 Rust CRM v0.1.0
 Type 'help' for a list of commands.
-crm> Name: Website (blank for none): Added company #1
-crm> Name: Email: Phone (blank for none): Company id (blank for none): Added contact #1
+crm> Name: Website (optional): Added company #1
+crm> Name: Email: Phone (optional): Company id (blank for none): Added contact #1
 crm> Name: Email: Company name (blank for none): Source (website/referral/event/cold_outreach/other, blank for other): Notes (blank for none): Added lead #1
 crm> Name: Email: Company name (blank for none): Source (website/referral/event/cold_outreach/other, blank for other): Notes (blank for none): Added lead #2
 crm> Name: Email: Company name (blank for none): Source (website/referral/event/cold_outreach/other, blank for other): Notes (blank for none): Added lead #3
@@ -1300,17 +1324,21 @@ crm> Create a deal? (y/n): Error: a contact with email ada@acme.example already 
 crm> Lead #2 is qualified
 crm> Create a deal? (y/n): Converted lead #2: company #4, contact #4
 crm> #3    Ada Again            ada@acme.example             -                  event          qualified
-crm> #1    Acme Corp                prospect   -
-#3    Navy Labs                prospect   -
-#4    Linus (individual)       prospect   -
-crm> #1    Ada Lovelace         ada@acme.example             -            #1
-#3    Grace Hopper         grace@navy.example           -            #3
-#4    Linus                linus@kernel.example         -            #4
+crm> ID   NAME                 STAGE     WEBSITE
+#1   Acme Corp            prospect  -
+#3   Navy Labs            prospect  -
+#4   Linus (individual)   prospect  -
+crm> ID   NAME                 EMAIL                    PHONE          COMPANY
+#1   Ada Lovelace         ada@acme.example         -              #1
+#3   Grace Hopper         grace@navy.example       -              #3
+#4   Linus                linus@kernel.example     -              #4
+Page 1 of 1 (3 matching)
 crm> #2    COBOL modernisation        $25,000.00  qualification  company #3
-crm> Goodbye! (18 commands this session)
+crm> Goodbye! (17 commands this session)
 ```
 
-(Your company/contact row formats come from your own Lab 15 `Display` impls.)
+(The company and contact tables are your Lab 15 `Display` impls and Lab 17's
+`contact list` footer.)
 
 Check each behaviour against the code:
 

@@ -72,9 +72,12 @@ mkdir -p src/bin
 git mv src/main.rs src/bin/crm-cli.rs
 ```
 
-Nothing inside `crm-cli.rs` changes. It still parses `Args` with clap and calls
-`rust_crm::cli::run(storage, …).await`. A binary in `src/bin/` reaches the library the same way
-`main.rs` did, through `rust_crm::…`, because it's a separate crate that depends on the library.
+Nothing inside `crm-cli.rs` changes. It still parses `Args` with clap, builds the storage with
+`build_storage`, and calls `rust_crm::cli::run(storage, autosave_every).await`. Its
+`#[cfg(test)] mod tests` (the clap tests from Lab 23/24) moves with it, and `cargo test` keeps
+running them as the `crm-cli` binary's unit tests. A binary in `src/bin/` reaches the library the
+same way `main.rs` did, through `rust_crm::…`, because it's a separate crate that depends on the
+library.
 
 Now create a placeholder `src/main.rs` (it becomes the server in Step 6):
 
@@ -113,7 +116,7 @@ cargo run --bin crm-cli -- --storage memory # flags after `--` go to the program
 $ cargo run -q
 Rust CRM API v0.1.0: coming soon
 $ cargo run -q --bin crm-cli -- --help
-A terminal CRM
+A terminal CRM, written while learning Rust
 
 Usage: crm-cli [OPTIONS]
 …
@@ -610,7 +613,9 @@ async fn main() -> anyhow::Result<()> {
         .unwrap_or_else(|_| "crm-data.json".to_string())
         .into();
     let port: u16 = match std::env::var("PORT") {
-        Ok(port) => port.parse().context("PORT must be a number between 0 and 65535")?,
+        Ok(port) => port
+            .parse()
+            .context("PORT must be a number between 0 and 65535")?,
         Err(_) => 3000,
     };
 
@@ -631,7 +636,10 @@ async fn main() -> anyhow::Result<()> {
     let listener = tokio::net::TcpListener::bind(addr)
         .await
         .with_context(|| format!("could not listen on {addr}"))?;
-    println!("Rust CRM API v{} listening on http://{addr}", env!("CARGO_PKG_VERSION"));
+    println!(
+        "Rust CRM API v{} listening on http://{addr}",
+        env!("CARGO_PKG_VERSION")
+    );
     axum::serve(listener, app).await?;
     Ok(())
 }
@@ -863,7 +871,7 @@ you a confusing lifetime error, check *what* is being cloned. Put the derive bac
 ```text
 crm> company add
 Name: Umbrella
-Website (blank for none):
+Website (optional):
 Added company #3
 crm> quit
 …
@@ -871,10 +879,15 @@ $ curl -X POST … -d '{"name":"Hooli"}'
 {"id":3,"name":"Hooli","website":null,"lifecycle":"prospect"}
 …
 crm> company list
-#1 Acme Corp                [prospect] https://acme.example
-#2 Globex                   [prospect]
-#3 Hooli                    [prospect]
+ID   NAME                 STAGE     WEBSITE
+#1   Acme Corp            prospect  https://acme.example
+#2   Globex               prospect  -
+#3   Hooli                prospect  -
 ```
+
+(Start a **fresh** server in step 1, as written. A server that has been running since Run It may
+have used up id 3 already: `add_company` hands out an id before it validates the name, so the
+`{"name": "  "}` request from the rejections list above burns one.)
 
 Umbrella is **gone**, and both programs handed out id `#3` to different companies. The server
 never saw the REPL's write, and its `persist()` overwrote the file with its own stale snapshot
@@ -885,7 +898,7 @@ someone asks why you need a database server.
 > the server. Does it compile? What happens at startup?
 
 ```text
-thread 'main' (665512) panicked at src/http/mod.rs:26:10:
+thread 'main' (665512) panicked at src/http/mod.rs:20:10:
 Path segments must not start with `:`. For capture groups, use `{capture}`. If you meant to literally match a segment starting with a colon, call `without_v07_checks` on the router.
 ```
 
@@ -935,7 +948,7 @@ the server:
 
 ```bash
 CRM_DATA_FILE=demo.json cargo run -q --bin crm-cli
-#   contact add → Ada Lovelace / ada@acme.example / 555-0100 / company 1 → quit
+#   contact add → Ada Lovelace / ada@acme.example / 555-0100 / 1 (the company id) → quit
 CRM_DATA_FILE=demo.json cargo run
 ```
 

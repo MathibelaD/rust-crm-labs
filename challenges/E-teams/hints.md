@@ -253,4 +253,9 @@ The four Lab 36 tests that assumed "managers see everything"
 fail after your change. Put the manager and the reps in one team in those tests, and add a
 comment explaining why.
 
+One more test relied on it: Lab 36 Your Turn 5 made `keyset_pages_walk_the_whole_history_once`
+(`tests/api/activities.rs`) log in as a manager to reach fixture deal 1, which belongs to the
+teamless fixture user. A teamless manager now only sees their own deals, so that test needs an
+**admin** token (`login_as(.., Role::Admin)`) instead.
+
 </details>

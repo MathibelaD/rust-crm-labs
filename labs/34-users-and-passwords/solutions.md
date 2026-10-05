@@ -14,22 +14,30 @@ fn validate_registration(req: RegisterRequest) -> Result<(NewUser, SecretString)
     let email = match Email::parse(&req.email) {
         Ok(email) => Some(email),
         Err(e) => {
-            errors.push(FieldError::new("email", e.to_string()));
+            errors.push(FieldError {
+                field: "email",
+                message: e.to_string(),
+            });
             None
         }
     };
 
     let name = req.name.trim().to_string();
     if name.is_empty() {
-        errors.push(FieldError::new("name", "must not be empty"));
+        errors.push(FieldError {
+            field: "name",
+            message: "must not be empty".to_string(),
+        });
     }
 
     let length = req.password.expose_secret().chars().count();
     if !(MIN_PASSWORD_CHARS..=MAX_PASSWORD_CHARS).contains(&length) {
-        errors.push(FieldError::new(
-            "password",
-            format!("must be between {MIN_PASSWORD_CHARS} and {MAX_PASSWORD_CHARS} characters"),
-        ));
+        errors.push(FieldError {
+            field: "password",
+            message: format!(
+                "must be between {MIN_PASSWORD_CHARS} and {MAX_PASSWORD_CHARS} characters"
+            ),
+        });
     }
 
     match email {

@@ -152,10 +152,10 @@ pub(crate) enum CompanyCommand {
     Delete { id: CompanyId },
 }
 
-// in parse_company:
-        Some("list") => Ok(CompanyCommand::List {
-            filter: parse_company_list(&args[1..])?,
-        }),
+// in parse_company, replacing the ("list", []) arm:
+        ("list", flags) => CompanyCommand::List {
+            filter: parse_company_list(flags)?,
+        },
 
 const COMPANY_LIST_USAGE: &str =
     "company list [--stage <prospect|customer|churned>] [--search <term>]";
@@ -197,7 +197,7 @@ blanket impl (Lab 15). `print_table` didn't change at all.
 Parser tests:
 
 ```rust
-    use crate::errors::ValidationError;   // in the test module
+    // `ValidationError` is already imported in this test module (Lab 15 Step 7).
 
     #[test]
     fn company_list_flags() {
@@ -240,20 +240,14 @@ crm> company list --stage won
 Error: invalid lifecycle 'won' (expected prospect, customer or churned)
 ```
 
-Updated help (the full block, for reference):
+Updated help: replace the `company list` line of `print_help` with
 
 ```rust
-fn print_help() {
-    println!("Commands:");
-    println!("  company add");
     println!("  company list [--stage <prospect|customer|churned>] [--search <term>]");
-    println!("  company show <id> | stage <id> <stage> | delete <id>");
-    println!("  contact add");
-    println!("  contact list [--company <id>] [--search <term>] [--sort id|name|email] [--page <n>]");
-    println!("  contact show <id> | update <id> | delete <id> | search <term>");
-    println!("  stats | help | version | quit");
-}
+    println!("                              list companies");
 ```
+
+and change `list` to `list [flags]` in the `COMPANY_USAGE` constant in `parser.rs`.
 
 ---
 
@@ -396,8 +390,13 @@ fn print_stats(crm: &Crm) {
 }
 ```
 
-plus `Stats` in the `Command` enum, `"stats" => Command::Stats` in `parse_command`, and
-`Command::Stats => print_stats(crm),` in `execute`.
+plus `Stats` in the `Command` enum, `["stats", ..] => Command::Stats,` in `parse_command`'s
+slice match (next to `["help", ..]`), `Command::Stats => print_stats(crm),` in `execute`, and a
+line in `print_help`'s "Other:" block:
+
+```rust
+    println!("  stats                       companies per stage, contacts, top domains");
+```
 
 - `.map(|(_, n)| n).sum()` sums `&usize`s: `usize` implements `Sum<&usize>` as well as
   `Sum<usize>`, so no `.copied()` is needed. (Lab 18 implements both forms for `Money`, and explains

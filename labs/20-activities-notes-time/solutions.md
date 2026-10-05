@@ -168,10 +168,13 @@ number of items for that subject. That's fine for a CRM record. (A database vers
 Output, after logging a meeting on company 1:
 
 ```text
-#1    Acme Corp                prospect   -
-Contacts (2):
-  #1    Ada Lovelace         ada@acme.example             -            #1
-  #2    Charles Babbage      charles@acme.example         -            #1
+crm> company show 1
+ID   NAME                 STAGE     WEBSITE
+#1   Acme Corp            prospect  -
+
+ID   NAME                 EMAIL                    PHONE          COMPANY
+#1   Ada Lovelace         ada@acme.example         -              #1
+#2   Charles Babbage      charles@acme.example     -              #1
   Recent history:
     2026-10-07 15:30  meeting at 2026-10-07 14:00 UTC (2 attendees): On-site demo
 ```
@@ -269,7 +272,7 @@ A session that exercises all three Your Turns:
 
 ```text
 crm> Kind (call/email/meeting): Starts at (YYYY-MM-DD HH:MM, UTC): Attendee contact ids (e.g. 3,5; blank for none): Summary: When (YYYY-MM-DD HH:MM, UTC; blank for now): Logged activity #1 on company:1
-crm> Kind (call/email/meeting): Starts at (YYYY-MM-DD HH:MM, UTC): Attendee contact ids (e.g. 3,5; blank for none): Summary: When (YYYY-MM-DD HH:MM, UTC; blank for now): Error: contact #7 not found
+crm> Kind (call/email/meeting): Starts at (YYYY-MM-DD HH:MM, UTC): Attendee contact ids (e.g. 3,5; blank for none): Summary: When (YYYY-MM-DD HH:MM, UTC; blank for now): Error: no contact with id 7
 crm> Kind (call/email/meeting): Starts at (YYYY-MM-DD HH:MM, UTC): Error: invalid date/time (expected YYYY-MM-DD HH:MM): 'next tuesday'
 ```
 

@@ -67,11 +67,12 @@ git diff --no-index src/companies/store.rs src/contacts/store.rs
 ```
 
 ```text
- src/{companies => contacts}/store.rs | 84 +++++++++++++++++++++++++-----------
- 1 file changed, 59 insertions(+), 25 deletions(-)
+ src/{companies => contacts}/store.rs | 137 +++++++++++++++++++++++++----------
+ 1 file changed, 100 insertions(+), 37 deletions(-)
 ```
 
-Scroll through the full diff. Most hunks are renames: `CompanyStore`→`ContactStore`,
+(Your numbers depend on your tests and doc comments.) Scroll through the full diff. Most hunks
+are renames: `CompanyStore`→`ContactStore`,
 `companies`→`contacts`, `Company`→`Contact`. Make a list of what **actually** differs. You
 should end up with something like:
 
@@ -81,7 +82,7 @@ should end up with something like:
 | The id type (`CompanyId` / `ContactId`) | Look up by id, look up mutably, remove by id, list all, count |
 | How to turn the counter into an id (`CompanyId(n)` / `ContactId(n)`) | Ids are never reused |
 | Contact-only queries: `email_exists`, `search`, `page` | |
-| What `add` checks (website vs duplicate email) | |
+| What `add` validates (`Validate for Company` vs `Validate for Contact`) | |
 
 The left column is the design. The item type becomes a **type parameter** `T`. "Read the id of
 an item" is `Entity::id`, from Lab 15. "Turn a counter into an id" is the `From<u64>` you added
@@ -412,7 +413,8 @@ impl<T: Entity> Default for InMemoryRepo<T> {
 
 ## Step 7 — Contact-only queries: an inherent impl on one instantiation
 
-`ContactStore` had queries that only make sense for contacts: `email_exists` and `search`. They
+`ContactStore` had queries that only make sense for contacts: `email_exists` and `search`.
+(`page` doesn't care what it pages; it goes in the generic block in Step 8.) They
 can't live in `impl<T: Entity> InMemoryRepo<T>`: a `T` has no `email`. But you can write an
 `impl` block for **one specific instantiation**:
 
@@ -448,7 +450,7 @@ mod queries;
 mod store;      // still here until Step 8
 
 pub use email::Email;
-pub use model::{Contact, ContactId};
+pub use model::{Contact, ContactId, initials, parse_phone};
 pub use store::ContactStore;
 ```
 
@@ -488,7 +490,8 @@ repo's invariants (ids unique, `next_id` only grows) can only be broken by code 
 
 Now the actual refactor.
 
-> 🟢 **FOLLOW ALONG**: rewrite the top of `src/crm.rs`:
+> 🟢 **FOLLOW ALONG**: rewrite the top of `src/crm.rs` (everything down to the end of
+> `add_contact`):
 
 ```rust
 use crate::companies::{Company, CompanyId, Lifecycle};
@@ -497,6 +500,7 @@ use crate::entity::Validate;
 use crate::errors::CrmError;
 use crate::repo::InMemoryRepo;
 
+/// Everything the CRM knows, plus the rules for changing it.
 #[derive(Default)]
 pub struct Crm {
     pub companies: InMemoryRepo<Company>,
@@ -506,6 +510,22 @@ pub struct Crm {
 impl Crm {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Looks up a company, turning "not there" into a `CrmError`.
+    pub fn company(&self, id: CompanyId) -> Result<&Company, CrmError> {
+        self.companies.get(id).ok_or(CrmError::NotFound {
+            entity: "company",
+            id: id.0,
+        })
+    }
+
+    /// Looks up a contact, turning "not there" into a `CrmError`.
+    pub fn contact(&self, id: ContactId) -> Result<&Contact, CrmError> {
+        self.contacts.get(id).ok_or(CrmError::NotFound {
+            entity: "contact",
+            id: id.0,
+        })
     }
 
     pub fn add_company(
@@ -525,33 +545,25 @@ impl Crm {
         phone: Option<String>,
         company_id: Option<CompanyId>,
     ) -> Result<ContactId, CrmError> {
-        if let Some(company_id) = company_id
-            && self.companies.get(company_id).is_none()
-        {
-            return Err(CrmError::NotFound {
-                entity: "company",
-                id: company_id.0,
-            });
+        if let Some(company_id) = company_id {
+            self.company(company_id)?;
         }
         if self.contacts.email_exists(&email) {
             return Err(CrmError::DuplicateEmail(email.as_str().to_string()));
         }
-        let contact = Contact {
-            id: self.contacts.next_id(),
-            name,
-            email,
-            phone,
-            company_id,
-        };
+        let contact = Contact::new(self.contacts.next_id(), name, email, phone, company_id);
         contact.validate()?;
         Ok(self.contacts.insert(contact))
     }
 ```
 
-Then, in the rest of `impl Crm`, rename the store calls: `self.companies.find(..)` →
-`self.companies.get(..)`, `find_mut` → `get_mut`. `remove`, `all` keep their names. (If your
-`impl Default for Crm` was hand-written, delete it: `#[derive(Default)]` now works because both
-fields implement `Default`.)
+The validation that Lab 15 put in `CompanyStore::add` and `ContactStore::add` now happens
+here, in `Crm`, right before `insert`.
+
+Then, in the rest of `impl Crm`, rename the store calls: `find_mut` → `get_mut` (in
+`update_contact` and `set_lifecycle`). `remove`, `all` keep their names. Delete the hand-written
+`impl Default for Crm` at the bottom of the file: `#[derive(Default)]` now works because both
+fields implement `Default` (and leaving both is E0119, "conflicting implementations").
 
 `#[derive(Default)]` on `Crm` generates `Crm { companies: Default::default(), contacts:
 Default::default() }`, which calls *your* `impl<T: Entity> Default for InMemoryRepo<T>` twice,
@@ -567,38 +579,40 @@ and remove the `mod store;` / `pub use store::...;` lines from both `mod.rs` fil
 `cargo check`, and let the compiler drive:
 
 ```text
-error[E0599]: no method named `find` found for struct `InMemoryRepo<T>` in the current scope
-  --> src/cli/commands.rs:74:41
-   |
-74 |             let company = crm.companies.find(id).ok_or(CrmError::NotFound {
-   |                                         ^^^^ method not found in `InMemoryRepo<Company>`
-
 error[E0599]: no method named `page` found for struct `InMemoryRepo<T>` in the current scope
-   --> src/cli/commands.rs:117:41
-    |
-117 |             let contacts = crm.contacts.page(page, PAGE_SIZE);
-    |                                         ^^^^ method not found in `InMemoryRepo<Contact>`
+  --> src/cli/commands.rs:97:41
+   |
+97 |             let contacts = crm.contacts.page(page, PAGE_SIZE);
+   |                                         ^^^^ method not found in `InMemoryRepo<Contact>`
+   |
+  ::: src/repo.rs:5:1
+   |
+ 5 | pub struct InMemoryRepo<T: Entity> {
+   | ---------------------------------- method `page` not found for this struct
 ```
 
-`find` → `get` in `commands.rs`. For `page`: the paging logic doesn't depend on contacts at all,
-so it belongs in the generic block. Move it from your deleted `ContactStore` into
-`impl<T: Entity> InMemoryRepo<T>`:
+That's the only error. The paging logic doesn't depend on contacts at all, so it belongs in the
+generic block. Move it from your deleted `ContactStore` into `impl<T: Entity> InMemoryRepo<T>`,
+renaming `self.contacts` to `self.items`:
 
 ```rust
-    /// One page of items (1-based). Out-of-range pages are empty, never a panic.
+    /// One page of items (pages start at 1). Empty when out of range.
     pub fn page(&self, page: usize, per_page: usize) -> &[T] {
-        let start = page.saturating_sub(1) * per_page;
+        if page == 0 || per_page == 0 {
+            return &[];
+        }
+        let start = (page - 1).saturating_mul(per_page);
         if start >= self.items.len() {
             return &[];
         }
-        let end = (start + per_page).min(self.items.len());
+        let end = start.saturating_add(per_page).min(self.items.len());
         &self.items[start..end]
     }
 ```
 
-Keep going until `cargo check` shows only the `unused variable: term` warning from `todo!()`.
-Notice how few lines in `commands.rs` changed: the CLI talks to `Crm` and its public fields,
-and the method names barely moved. That's Lab 14's "CLI only parses, prompts and prints" rule
+Now `cargo check` shows only the `unused variable: term` warning from `todo!()`. Notice that
+nothing in `commands.rs` changed except what `page` needed: the CLI talks to `Crm` (`crm.company(id)?`,
+`crm.contact(id)?`) and its public fields, and the method names barely moved. That's Lab 14's "CLI only parses, prompts and prints" rule
 paying off.
 
 ### Where did validation go, and what is that gap?
@@ -871,32 +885,32 @@ Rust CRM v0.1.0
 Type 'help' for a list of commands.
 crm> company add
 Name: Acme Corp
-Website (blank for none): acme.io
+Website (optional): acme.io
 Added company #1
 crm> company add
 Name: Globex
-Website (blank for none): globex com
+Website (optional): globex com
 Error: invalid website: globex com
 crm> company add
 Name: Globex
-Website (blank for none): globex.com
+Website (optional): globex.com
 Added company #3
 crm> contact add
 Name: Ada Lovelace
 Email: ada@acme.io
-Phone (blank for none): 555-0100
+Phone (optional): 555-0100
 Company id (blank for none): 1
 Added contact #1
 crm> contact add
 Name: Ada Clone
 Email: ADA@acme.io
-Phone (blank for none):
+Phone (optional):
 Company id (blank for none):
 Error: a contact with email ada@acme.io already exists
 crm> contact add
 Name: Grace Hopper
 Email: grace@navy.mil
-Phone (blank for none):
+Phone (optional):
 Company id (blank for none): 3
 Added contact #2
 crm> company list
@@ -904,7 +918,7 @@ ID   NAME                 STAGE     WEBSITE
 #1   Acme Corp            prospect  acme.io
 #3   Globex               prospect  globex.com
 crm> quit
-Goodbye! (8 commands this session)
+Goodbye! (7 commands this session)
 ```
 
 Same behaviour as Lab 15, except Globex is `#3`: the rejected attempt consumed `#2` (Step 8).
@@ -944,18 +958,18 @@ used, and you saw the copies with `nm`. You pay in compile time and binary size,
 
 ```text
 error[E0277]: the trait bound `Company: Default` is not satisfied
-  --> src/crm.rs:9:5
+  --> src/crm.rs:13:5
    |
- 7 | #[derive(Default)]
+11 | #[derive(Default)]
    |          ------- in this derive macro expansion
- 8 | pub struct Crm {
- 9 |     pub companies: InMemoryRepo<Company>,
+12 | pub struct Crm {
+13 |     pub companies: InMemoryRepo<Company>,
    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ unsatisfied trait bound
    |
 help: the trait `Default` is not implemented for `Company`
-  --> src/companies/model.rs:54:1
+  --> src/companies/model.rs:57:1
    |
-54 | pub struct Company {
+57 | pub struct Company {
    | ^^^^^^^^^^^^^^^^^^
 help: the trait `Default` is conditionally implemented for `InMemoryRepo<T>`
   --> src/repo.rs:5:10
@@ -980,9 +994,9 @@ on a generic type? Restore the manual impl.
 
 ```text
 error[E0599]: no method named `search` found for struct `InMemoryRepo<Company>` in the current scope
-   --> src/cli/commands.rs:147:38
+   --> src/cli/commands.rs:124:38
     |
-147 |             let oops = crm.companies.search(term);
+124 |             let oops = crm.companies.search(term);
     |                                      ^^^^^^ method not found in `InMemoryRepo<Company>`
     |
    ::: src/repo.rs:5:1
@@ -1002,25 +1016,28 @@ methods. The last note is the compiler telling you where the method does exist.
 
 ```text
 error[E0599]: the method `get` exists for struct `InMemoryRepo<Contact>`, but its trait bounds were not satisfied
-   --> src/cli/commands.rs:125:40
-    |
-125 |             let contact = crm.contacts.get(id).ok_or(CrmError::NotFound {
-    |                                        ^^^ method cannot be called on `InMemoryRepo<Contact>` due to unsatisfied trait bounds
-    |
-   ::: src/contacts/model.rs:9:1
-    |
-  9 | pub struct ContactId(pub u64);
-    | -------------------- doesn't satisfy `ContactId: From<u64>`
+  --> src/crm.rs:32:23
+   |
+32 |         self.contacts.get(id).ok_or(CrmError::NotFound {
+   |                       ^^^ method cannot be called on `InMemoryRepo<Contact>` due to unsatisfied trait bounds
+   |
+  ::: src/contacts/model.rs:10:1
+   |
+10 | pub struct ContactId(pub u64);
+   | -------------------- doesn't satisfy `ContactId: From<u64>`
 ...
 note: trait bound `ContactId: From<u64>` was not satisfied
-   --> src/repo.rs:12:12
-    |
- 10 | impl<T: Entity> InMemoryRepo<T>
-    |                 ---------------
- 11 | where
- 12 |     T::Id: From<u64>,
-    |            ^^^^^^^^^ unsatisfied trait bound introduced here
+  --> src/repo.rs:12:12
+   |
+10 | impl<T: Entity> InMemoryRepo<T>
+   |                 ---------------
+11 | where
+12 |     T::Id: From<u64>,
+   |            ^^^^^^^^^ unsatisfied trait bound introduced here
 ```
+
+(That's one of ten such errors: `all`, `len`, `is_empty`, `page`, `insert`, `remove`,
+`get_mut`, ... every method in the block, wherever it's called on contacts.)
 
 (You'll also get E0277s from `parse_id` in the parser: your Lab 15 Your Turn 3 made it require
 `Id: From<u64>` too. Same bound, different place.)

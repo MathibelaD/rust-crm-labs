@@ -51,48 +51,71 @@ and when?
 > **About your starting code.** Labs 21–24 were yours to write, so your messages and helper
 > names may differ slightly from the ones shown here. This lab relies only on these shapes from
 > Lab 24:
-> `cli::run(storage: Box<dyn Storage>) -> anyhow::Result<()>`, a `Crm` you load at start,
-> an `execute(&mut Crm, Command) -> Result<(), CrmError>` function in `cli/commands.rs`, and
-> *some* way of knowing whether a command changed data (this lab uses a
-> `Command::is_mutating()` helper; if you used a bool return instead, keep it).
+> `cli::run(storage: Box<dyn Storage>) -> anyhow::Result<()>` (built by `build_storage` in
+> `main.rs`), a `Crm` you load at start, an
+> `execute(&mut Crm, Command) -> Result<(), CliError>` function in `cli/commands.rs` (with
+> `CliError` in `cli/error.rs` from Lab 22), the REPL loop inside `run` (Lab 14's
+> `loop { … break count … }` that reads stdin itself), the `prompt`/`prompt_optional` helpers and
+> `error_chain`, `Command::is_mutating()`, the `Storage::describe()` banner line, and Lab 24's
+> `tests/persistence.rs` with its `RecordingStorage` test double.
 
 ---
 
 ## Step 0 — Where we start
 
-Open `src/cli/mod.rs`. Lab 24's `run` looks roughly like this:
+Open `src/cli/mod.rs`. Lab 24's `run` looks like this:
 
 ```rust
 pub fn run(storage: Box<dyn Storage>) -> anyhow::Result<()> {
-    let mut crm = storage.load().context("could not load CRM data")?;
-    println!("Rust CRM v{}", env!("CARGO_PKG_VERSION"));
+    println!("{APP_NAME} v{}", env!("CARGO_PKG_VERSION"));
     println!("Type 'help' for a list of commands.");
-    println!("Loaded {} companies, {} contacts, {} deals, {} leads.", /* ... */);
+    println!("Storage: {}", storage.describe());
 
-    let mut commands_run = 0;
-    loop {
+    let mut crm = storage
+        .load()
+        .context("refusing to start, so the data file is not overwritten")?;
+    println!("Loaded {}, {}, {}, {}", /* count(…) for companies, contacts, deals, leads */);
+    let mut count = 0;
+
+    let commands_run = loop {
         print!("crm> ");
-        io::stdout().flush()?;
+        io::stdout().flush().expect("failed to flush stdout");
+
         let mut input = String::new();
-        if io::stdin().read_line(&mut input)? == 0 {
-            break; // Ctrl-D / end of input
+        let bytes = io::stdin()
+            .read_line(&mut input)
+            .expect("failed to read line");
+        if bytes == 0 {
+            println!();
+            break count;
         }
-        let command = match parse_command(&input) { /* Ok(Some(c)) => c, ... */ };
-        commands_run += 1;
-        if command == Command::Quit {
-            break;
-        }
-        let mutating = command.is_mutating();
-        match execute(&mut crm, command) {
-            Ok(()) if mutating => {
-                if let Err(e) = storage.save(&crm) {
-                    println!("Error: {:#}", anyhow::Error::from(e));
+
+        let result = match parser::parse_command(&input) {
+            Ok(None) => continue,
+            Ok(Some(Command::Quit)) => break count,
+            Ok(Some(command)) => {
+                let mutating = command.is_mutating();
+                let result = commands::execute(&mut crm, command);
+                if result.is_ok()
+                    && mutating
+                    && let Err(e) = storage.save(&crm)
+                {
+                    println!("Error: {}", error_chain(&e));
+                    println!(
+                        "(The change is kept in memory and will be saved with your next change.)"
+                    );
                 }
+                result
             }
-            Ok(()) => {}
-            Err(e) => println!("Error: {e}"),
+            Err(e) => Err(e),
+        };
+        count += 1;
+
+        if let Err(e) = result {
+            println!("Error: {}", error_chain(&e));
         }
-    }
+    };
+
     println!("Goodbye! ({commands_run} commands this session)");
     Ok(())
 }
@@ -115,7 +138,7 @@ share **one heap**.
            ┌──────────────────┐         ┌──────────────────┐
   run()    │ crm: Crm ────────┼──┐      │ closure's        │
            │ storage: Box ────┼─┐│      │ captured values  │
-           │ commands_run     │ ││      │                  │
+           │ count            │ ││      │                  │
            └──────────────────┘ ││      └──────────────────┘
                                 ▼▼
                    ┌─────────────────────────────┐
@@ -153,7 +176,8 @@ Let's start small: a thread that wakes up every 30 seconds and reports how many 
 
 > 🟡 **EXPERIMENT**: predict first, then run `cargo check`.
 
-In `src/cli/mod.rs`, add the imports and, in `run`, just after the "Loaded …" line:
+In `src/cli/mod.rs`, add the imports (below `use std::io::{self, Write};`) and, in `run`, just
+after the "Loaded …" line:
 
 ```rust
 use std::thread;
@@ -172,43 +196,49 @@ use std::time::Duration;
 
 ```text
 error[E0373]: closure may outlive the current function, but it borrows `crm.companies`, which is owned by the current function
-  --> src/cli/mod.rs:41:19
+  --> src/cli/mod.rs:43:19
    |
-41 |     thread::spawn(|| {
+43 |     thread::spawn(|| {
    |                   ^^ may outlive borrowed value `crm.companies`
 ...
-44 |             println!("[autosave] would save {} companies", crm.companies.len());
+46 |             println!("[autosave] would save {} companies", crm.companies.len());
    |                                                            ------------- `crm.companies` is borrowed here
    |
 note: function requires argument type to outlive `'static`
-  --> src/cli/mod.rs:41:5
+  --> src/cli/mod.rs:43:5
    |
-41 | /     thread::spawn(|| {
-42 | |         loop {
-43 | |             thread::sleep(Duration::from_secs(30));
-44 | |             println!("[autosave] would save {} companies", crm.companies.len());
-45 | |         }
-46 | |     });
+43 | /     thread::spawn(|| {
+44 | |         loop {
+45 | |             thread::sleep(Duration::from_secs(30));
+46 | |             println!("[autosave] would save {} companies", crm.companies.len());
+47 | |         }
+48 | |     });
    | |______^
 help: to force the closure to take ownership of `crm.companies` (and any other referenced variables), use the `move` keyword
    |
-41 |     thread::spawn(move || {
+43 |     thread::spawn(move || {
    |                   ++++
 
 error[E0502]: cannot borrow `crm` as mutable because it is also borrowed as immutable
-  --> src/cli/mod.rs:69:23
+  --> src/cli/mod.rs:70:48
    |
-41 |       thread::spawn(|| {
+43 |       thread::spawn(|| {
    |       -             -- immutable borrow occurs here
-...
-44 | |             println!("[autosave] would save {} companies", crm.companies.len());
+   |  _____|
+   | |
+44 | |         loop {
+45 | |             thread::sleep(Duration::from_secs(30));
+46 | |             println!("[autosave] would save {} companies", crm.companies.len());
    | |                                                            ------------- first borrow occurs due to use of `crm.companies` in closure
-45 | |         }
-46 | |     });
+47 | |         }
+48 | |     });
    | |______- argument requires that `crm.companies` is borrowed for `'static`
 ...
-69 |           match execute(&mut crm, command) {
-   |                         ^^^^^^^^ mutable borrow occurs here
+70 |                   let result = commands::execute(&mut crm, command);
+   |                                                  ^^^^^^^^ mutable borrow occurs here
+   |
+note: requirement that the value outlives `'static` introduced here
+  --> /rustc/b940084d7eb6a299eb4bfeb8e34901bc051e7ac4/library/std/src/thread/functions.rs:128:14
 ```
 
 **Read the errors.** Work through the four questions:
@@ -251,16 +281,16 @@ Let's see what that costs.
 
 ```text
 error[E0382]: borrow of partially moved value: `crm`
-  --> src/cli/mod.rs:69:23
+  --> src/cli/mod.rs:70:48
    |
-41 |     thread::spawn(move || {
+43 |     thread::spawn(move || {
    |                   ------- value partially moved into closure here
 ...
-44 |             println!("[autosave] would save {} companies", crm.companies.len());
+46 |             println!("[autosave] would save {} companies", crm.companies.len());
    |                                                            ------------- variable partially moved due to use in closure
 ...
-69 |         match execute(&mut crm, command) {
-   |                       ^^^^^^^^ value borrowed here after partial move
+70 |                 let result = commands::execute(&mut crm, command);
+   |                                                ^^^^^^^^ value borrowed here after partial move
    |
    = note: partial move occurs because `crm.companies` has type `InMemoryRepo<Company>`, which does not implement the `Copy` trait
 ```
@@ -307,21 +337,29 @@ use std::rc::Rc;
 
 ```text
 error[E0277]: `Rc<RefCell<Crm>>` cannot be sent between threads safely
-  --> src/cli/mod.rs:45:19
+  --> src/cli/mod.rs:47:19
    |
-45 |       thread::spawn(move || {
+47 |       thread::spawn(move || {
    |       ------------- ^------
    |       |             |
-   |  _____|_____________within this `{closure@src/cli/mod.rs:45:19: 45:26}`
+   |  _____|_____________within this `{closure@src/cli/mod.rs:47:19: 47:26}`
    | |     |
    | |     required by a bound introduced by this call
-...
-51 | |     });
+48 | |         loop {
+49 | |             thread::sleep(Duration::from_secs(30));
+50 | |             let crm = for_thread.borrow();
+...  |
+53 | |     });
    | |_____^ `Rc<RefCell<Crm>>` cannot be sent between threads safely
    |
-   = help: within `{closure@src/cli/mod.rs:45:19: 45:26}`, the trait `Send` is not implemented for `Rc<RefCell<Crm>>`
+   = help: within `{closure@src/cli/mod.rs:47:19: 47:26}`, the trait `Send` is not implemented for `Rc<RefCell<Crm>>`
 note: required because it's used within this closure
+  --> src/cli/mod.rs:47:19
+   |
+47 |     thread::spawn(move || {
+   |                   ^^^^^^^
 note: required by a bound in `spawn`
+  --> /rustc/b940084d7eb6a299eb4bfeb8e34901bc051e7ac4/library/std/src/thread/functions.rs:125:0
 ```
 
 This time it's not a lifetime problem. `for_thread` is owned, so the closure is `'static`. It's
@@ -380,19 +418,29 @@ nanoseconds more per clone/drop, which is why `Rc` still exists.
 
 ```text
 error[E0277]: `RefCell<Crm>` cannot be shared between threads safely
-  --> src/cli/mod.rs:45:19
+  --> src/cli/mod.rs:47:19
    |
-45 |       thread::spawn(move || {
+47 |       thread::spawn(move || {
    |  _____-------------_^
-...
-51 | |     });
+   | |     |
+   | |     required by a bound introduced by this call
+48 | |         loop {
+49 | |             thread::sleep(Duration::from_secs(30));
+50 | |             let crm = for_thread.borrow();
+...  |
+53 | |     });
    | |_____^ `RefCell<Crm>` cannot be shared between threads safely
    |
    = help: the trait `Sync` is not implemented for `RefCell<Crm>`
    = note: if you want to do aliasing and mutation between multiple threads, use `std::sync::RwLock` instead
    = note: required for `Arc<RefCell<Crm>>` to implement `Send`
 note: required because it's used within this closure
+  --> src/cli/mod.rs:47:19
+   |
+47 |     thread::spawn(move || {
+   |                   ^^^^^^^
 note: required by a bound in `spawn`
+  --> /rustc/b940084d7eb6a299eb4bfeb8e34901bc051e7ac4/library/std/src/thread/functions.rs:125:0
 ```
 
 Read the chain of `note:`s from bottom to top. That's how the compiler reasons about auto traits:
@@ -426,15 +474,15 @@ What if we drop `RefCell` altogether?
     });
 ```
 
-(Also change `let mut crm = storage.load()…` to `let crm = …` and `execute(&mut crm, command)`
-to `execute(&mut *crm, command)`.)
+(Also change `let mut crm = storage.load()…` to `let crm = …` and
+`commands::execute(&mut crm, command)` to `commands::execute(&mut *crm, command)`.)
 
 ```text
 error[E0596]: cannot borrow data in an `Arc` as mutable
-  --> src/cli/mod.rs:72:23
+  --> src/cli/mod.rs:73:48
    |
-72 |         match execute(&mut *crm, command) {
-   |                       ^^^^^^^^^ cannot borrow as mutable
+73 |                 let result = commands::execute(&mut *crm, command);
+   |                                                ^^^^^^^^^ cannot borrow as mutable
    |
    = help: trait `DerefMut` is required to modify through a dereference, but it is not implemented for `Arc<Crm>`
 ```
@@ -554,6 +602,7 @@ Register the module in `src/cli/mod.rs`:
 ```rust
 mod autosave;
 mod commands;
+mod error;
 mod parser;
 ```
 
@@ -564,7 +613,9 @@ mod parser;
 The autosave thread needs the storage as well as the data. In Lab 23 `run` received a
 `Box<dyn Storage>`. Can a box go to another thread?
 
-> 🟡 **EXPERIMENT**: temporarily add this inside `run`, then `cargo check`, then delete it.
+> 🟡 **EXPERIMENT**: temporarily add this inside `run`, right after the `Storage: …` line, then
+> `cargo check`, then delete it. (Ignore the "unused import" warnings from the half-written
+> `autosave.rs`.)
 
 ```rust
     // 🟡 can the storage itself go to another thread?
@@ -574,9 +625,9 @@ The autosave thread needs the storage as well as the data. In Lab 23 `run` recei
 
 ```text
 error[E0277]: `dyn Storage` cannot be sent between threads safely
-  --> src/cli/mod.rs:39:37
+  --> src/cli/mod.rs:30:37
    |
-39 |     let handle = std::thread::spawn(move || storage.load());
+30 |     let handle = std::thread::spawn(move || storage.load());
    |                  ------------------ ^^^^^^^^^^^^^^^^^^^^^^ `dyn Storage` cannot be sent between threads safely
    |                  |
    |                  required by a bound introduced by this call
@@ -584,8 +635,14 @@ error[E0277]: `dyn Storage` cannot be sent between threads safely
    = help: the trait `Send` is not implemented for `dyn Storage`
    = note: required for `std::ptr::Unique<dyn Storage>` to implement `Send`
 note: required because it appears within the type `Box<dyn Storage>`
+  --> /rustc/b940084d7eb6a299eb4bfeb8e34901bc051e7ac4/library/alloc/src/boxed.rs:236:11
 note: required because it's used within this closure
+  --> src/cli/mod.rs:30:37
+   |
+30 |     let handle = std::thread::spawn(move || storage.load());
+   |                                     ^^^^^^^
 note: required by a bound in `spawn`
+  --> /rustc/b940084d7eb6a299eb4bfeb8e34901bc051e7ac4/library/std/src/thread/functions.rs:125:0
 ```
 
 But `JsonFileStorage` is just a `PathBuf`, and `PathBuf` is `Send`. So why does it fail?
@@ -599,12 +656,17 @@ it in the trait**:
 > 🟢 **FOLLOW ALONG**: in `src/storage/mod.rs`:
 
 ```rust
-/// Where the CRM lives between runs.
+/// Loads and saves a whole snapshot of the CRM.
 ///
 /// `Send + Sync` because the autosave thread uses the storage too.
 pub trait Storage: Send + Sync {
     fn load(&self) -> Result<Crm, StorageError>;
     fn save(&self, crm: &Crm) -> Result<(), StorageError>;
+
+    /// A short human description, shown in the banner.
+    fn describe(&self) -> String {
+        String::from("custom storage")
+    }
 }
 ```
 
@@ -615,13 +677,78 @@ pub trait Storage: Send + Sync {
   Your Turn 2's hint), and
 - at use sites: any `dyn Storage` is now known to be `Send + Sync`.
 
-`InMemoryStorage` (a unit struct) and `JsonFileStorage` (a `PathBuf`) satisfy it automatically,
-so you don't have to change anything else.
+`InMemoryStorage` (a unit struct) and `JsonFileStorage` (a `PathBuf`) satisfy it automatically.
+`cargo check` is happy. But `cargo check` doesn't build your integration tests. Run the tests:
+
+```bash
+cargo test
+```
+
+```text
+error[E0277]: `RefCell<Option<std::string::String>>` cannot be shared between threads safely
+  --> tests/persistence.rs:84:18
+   |
+84 | impl Storage for RecordingStorage {
+   |                  ^^^^^^^^^^^^^^^^ `RefCell<Option<std::string::String>>` cannot be shared between threads safely
+   |
+   = help: within `RecordingStorage`, the trait `Sync` is not implemented for `RefCell<Option<std::string::String>>`
+   = note: if you want to do aliasing and mutation between multiple threads, use `std::sync::RwLock` instead
+note: required because it appears within the type `RecordingStorage`
+  --> tests/persistence.rs:80:8
+   |
+80 | struct RecordingStorage {
+   |        ^^^^^^^^^^^^^^^^
+note: required by a bound in `Storage`
+  --> src/storage/mod.rs:20:27
+   |
+20 | pub trait Storage: Send + Sync {
+   |                           ^^^^ required by this bound in `Storage`
+```
+
+That's the first check from the list above, firing on a storage *you* wrote. Lab 24's test double
+keeps its snapshot in a `RefCell<Option<String>>` (if you used a `Cell` or `RefCell` of something
+else, you'll see the same error with your type). `RefCell` was the right tool on one thread, but
+it isn't `Sync`, so `RecordingStorage` can no longer promise what `Storage` now demands. Note that
+the error points at the `impl` line in `tests/`, not at some distant `thread::spawn`: the
+supertrait makes every backend prove it's thread-safe *where it's defined*.
+
+> 🟢 **FOLLOW ALONG**: in `tests/persistence.rs`, swap the `RefCell` for its thread-safe twin,
+> the `Mutex` from Step 6. `lock().unwrap()` plays the role of both `borrow()` and
+> `borrow_mut()`:
+
+```rust
+use std::fs;
+use std::sync::Mutex; // was: use std::cell::RefCell;
+```
+
+```rust
+#[derive(Debug, Default)]
+struct RecordingStorage {
+    snapshot: Mutex<Option<String>>,
+}
+
+impl Storage for RecordingStorage {
+    fn load(&self) -> Result<Crm, StorageError> {
+        match &*self.snapshot.lock().unwrap() {
+            Some(json) => Ok(serde_json::from_str(json).expect("we wrote this JSON ourselves")),
+            None => Ok(Crm::default()),
+        }
+    }
+
+    fn save(&self, crm: &Crm) -> Result<(), StorageError> {
+        let json = serde_json::to_string(crm).expect("a Crm always serializes");
+        *self.snapshot.lock().unwrap() = Some(json);
+        Ok(())
+    }
+}
+```
+
+`check_storage_contract(&dyn Storage)` doesn't change. `cargo test` is green again.
 
 ### `Box` → `Arc`
 
 The REPL and the thread both need the storage (the REPL will need it again in Your Turn 1). Two
-owners again, so `Arc`. Update `src/main.rs`:
+owners again, so `Arc`. Update `build_storage` in `src/main.rs`:
 
 ```rust
 use std::path::PathBuf;
@@ -630,11 +757,17 @@ use std::time::Duration;
 ```
 
 ```rust
-    let storage: Arc<dyn Storage> = match args.storage {
+/// The one place that decides which concrete storage the program uses.
+fn build_storage(args: Args) -> Arc<dyn Storage> {
+    match args.storage {
         StorageKind::Memory => Arc::new(InMemoryStorage),
         StorageKind::Json => Arc::new(JsonFileStorage::new(args.data_file)),
-    };
+    }
+}
 ```
+
+Your `main.rs` tests (`build_storage(args).describe()`) keep working unchanged: `describe`
+takes `&self`, and an `Arc` derefs to the storage just like a `Box` did.
 
 `Arc::new(InMemoryStorage)` creates an `Arc<InMemoryStorage>`. Assigning it to an
 `Arc<dyn Storage>` is an **unsizing coercion**: the pointer grows a vtable pointer. It's the same
@@ -649,10 +782,16 @@ While you're in `Args`, add the flag the thread needs:
 ```
 
 The `range(1..)` is a real safety check: `0` would make the thread wake up continuously and burn
-a CPU core. And the call at the end of `main` becomes:
+a CPU core. `build_storage` takes `args` by value, so read the interval *before* handing `args`
+over. `main` becomes:
 
 ```rust
-    rust_crm::cli::run(storage, Duration::from_secs(args.autosave_secs))
+fn main() -> anyhow::Result<()> {
+    let args = Args::parse();
+    let autosave_every = Duration::from_secs(args.autosave_secs);
+    let storage = build_storage(args);
+    rust_crm::cli::run(storage, autosave_every)
+}
 ```
 
 (It won't compile until Step 9 changes `run`'s signature.)
@@ -730,37 +869,43 @@ Ownership check, line by line:
 
 ## Step 9 — Rewire the REPL
 
-> 🟢 **FOLLOW ALONG**: replace `run` in `src/cli/mod.rs` and add a `repl` helper.
+> 🟢 **FOLLOW ALONG**: replace `run` in `src/cli/mod.rs` and add a `repl` helper. Keep
+> `APP_NAME`, `PAGE_SIZE`, `count`, `prompt` and `prompt_optional` as they are.
 
 ```rust
+mod autosave;
+mod commands;
+mod error;
+mod parser;
+
 use std::io::{self, Write};
 use std::sync::{Arc, Mutex, mpsc};
 use std::time::Duration;
 
 use anyhow::Context;
 
+use crate::errors::error_chain;
 use crate::storage::Storage;
-
-mod autosave;
-mod commands;
-mod parser;
-
 use autosave::{AppData, spawn_autosave};
-use commands::execute;
-use parser::{Command, parse_command};
+use parser::Command;
 ```
 
 ```rust
+/// Runs the interactive CRM until the user quits (or stdin closes).
 pub fn run(storage: Arc<dyn Storage>, autosave_every: Duration) -> anyhow::Result<()> {
-    let crm = storage.load().context("could not load CRM data")?;
-    println!("Rust CRM v{}", env!("CARGO_PKG_VERSION"));
+    println!("{APP_NAME} v{}", env!("CARGO_PKG_VERSION"));
     println!("Type 'help' for a list of commands.");
+    println!("Storage: {}", storage.describe());
+
+    let crm = storage
+        .load()
+        .context("refusing to start, so the data file is not overwritten")?;
     println!(
-        "Loaded {} companies, {} contacts, {} deals, {} leads.",
-        crm.companies.len(),
-        crm.contacts.len(),
-        crm.deals.len(),
-        crm.leads.len()
+        "Loaded {}, {}, {}, {}",
+        count(crm.companies.len(), "company", "companies"),
+        count(crm.contacts.len(), "contact", "contacts"),
+        count(crm.deals.len(), "deal", "deals"),
+        count(crm.leads.len(), "lead", "leads"),
     );
 
     let state = Arc::new(Mutex::new(AppData { crm, dirty: false }));
@@ -772,84 +917,93 @@ pub fn run(storage: Arc<dyn Storage>, autosave_every: Duration) -> anyhow::Resul
         shutdown_rx,
     );
 
-    let result = repl(&state);
+    let commands_run = repl(&state);
 
-    // Whatever happened in the REPL, stop the autosave thread cleanly.
+    // However the REPL ended, stop the autosave thread cleanly.
     let _ = shutdown_tx.send(());
     autosave.join().expect("autosave thread panicked");
 
-    let commands_run = result?;
     println!("Goodbye! ({commands_run} commands this session)");
     Ok(())
 }
 
 /// The read-eval-print loop. Returns how many commands were run.
-fn repl(state: &Mutex<AppData>) -> anyhow::Result<usize> {
-    let mut commands_run = 0;
+fn repl(state: &Mutex<AppData>) -> usize {
+    let mut count = 0;
+
     loop {
         print!("crm> ");
-        io::stdout().flush()?;
-        let mut input = String::new();
-        if io::stdin().read_line(&mut input)? == 0 {
-            break; // Ctrl-D / end of input
-        }
-        let command = match parse_command(&input) {
-            Ok(Some(command)) => command,
-            Ok(None) => continue,
-            Err(e) => {
-                println!("Error: {e}");
-                continue;
-            }
-        };
-        commands_run += 1;
-        if command == Command::Quit {
-            break;
-        }
-        let mutating = command.is_mutating();
+        io::stdout().flush().expect("failed to flush stdout");
 
-        let mut data = state.lock().unwrap();
-        let result = execute(&mut data.crm, command);
-        if result.is_ok() && mutating {
-            data.dirty = true;
+        let mut input = String::new();
+        let bytes = io::stdin()
+            .read_line(&mut input)
+            .expect("failed to read line");
+        if bytes == 0 {
+            println!();
+            break count;
         }
-        drop(data); // unlock *before* printing errors and reading the next line
+
+        let result = match parser::parse_command(&input) {
+            Ok(None) => continue,
+            Ok(Some(Command::Quit)) => break count,
+            Ok(Some(command)) => {
+                let mutating = command.is_mutating();
+                let mut data = state.lock().unwrap();
+                let result = commands::execute(&mut data.crm, command);
+                if result.is_ok() && mutating {
+                    data.dirty = true;
+                }
+                drop(data); // unlock *before* printing errors and reading the next line
+                result
+            }
+            Err(e) => Err(e),
+        };
+        count += 1;
 
         if let Err(e) = result {
-            println!("Error: {e}");
+            println!("Error: {}", error_chain(&e));
         }
     }
-    Ok(commands_run)
 }
 ```
+
+The banner is unchanged from Lab 24: `Storage: …` (from `describe()`, now called through the
+`Arc`), then the load, then `Loaded …`. `repl` is Lab 24's loop moved into its own function: the
+`loop` is the function's last expression, so `break count` is its return value. What changed is
+the middle of the `Ok(Some(command))` arm, and everything after the loop.
 
 Three design decisions to notice:
 
 1. **`Arc::clone(&state)` instead of `state.clone()`.** They do the same thing. Writing
    `Arc::clone` tells the reader "this bumps a reference count; it does *not* deep-copy the CRM."
    That matters, because `.clone()` on a big struct usually *is* expensive.
-2. **The REPL loop moved into `repl(&state)`, which returns a `Result`.** If the loop exits
-   early with `?` (say, stdout is closed), we *still* reach `send` and `join`. If `run` returned
-   straight out of the loop, the `JoinHandle` would be dropped, which **detaches** the thread,
-   and the process could exit in the middle of a save. Then we use `result?`.
-3. **`execute(&mut data.crm, …)`**: `data` is a `MutexGuard<AppData>`, and `data.crm` goes
-   through `DerefMut` to the real `Crm` inside the mutex. `execute` didn't change at all. It still
-   takes `&mut Crm`, and it has no idea a lock exists. Your Lab 14 decision to keep business
-   logic out of the CLI is paying off.
+2. **The REPL loop moved into its own function, `repl(&state)`.** However the loop ends (`quit`,
+   Ctrl-D), control comes back to `run`, which *always* reaches `send` and `join`. If `run`
+   could return straight out of the loop, the `JoinHandle` would be dropped, which **detaches**
+   the thread, and the process could exit in the middle of a save. (In Lab 26 reading input can
+   fail, `repl` will return a `Result`, and this structure is what guarantees the clean stop.)
+3. **`commands::execute(&mut data.crm, …)`**: `data` is a `MutexGuard<AppData>`, and `data.crm`
+   goes through `DerefMut` to the real `Crm` inside the mutex. `execute` didn't change at all. It
+   still takes `&mut Crm` and returns `Result<(), CliError>`, and it has no idea a lock exists.
+   Your Lab 14 decision to keep business logic out of the CLI is paying off.
 
 Why `let _ = shutdown_tx.send(())`? `send` fails only if the receiver is gone, which means the
 thread already exited. There's nothing useful to do about that, so we ignore it on purpose.
 Dropping `shutdown_tx` would *also* stop the thread (the `Disconnected` arm). The explicit `send`
 is clearer.
 
-If your `execute` call used to save immediately, that code is gone now. The dirty flag replaces
-it.
+The `storage.save(&crm)` after each mutating command, and its "(The change is kept in memory…)"
+message, are gone now. The dirty flag replaces them: a failed autosave is reported by the
+autosave thread and simply retried on the next tick, because `dirty` stays `true`.
 
 ```bash
 cargo check
-cargo clippy
+cargo clippy --all-targets
+cargo test
 ```
 
-Both should be clean.
+All three should be clean.
 
 ---
 
@@ -878,17 +1032,18 @@ The REPL looks like before. The difference is *when* the file is written:
 ```text
 Rust CRM v0.1.0
 Type 'help' for a list of commands.
-Loaded 0 companies, 0 contacts, 0 deals, 0 leads.
+Storage: JSON file lab25-demo.json
+Loaded 0 companies, 0 contacts, 0 deals, 0 leads
 crm> company add
 Name: Acme Corp
-Website (blank for none): https://acme.example
+Website (optional): https://acme.example
 Added company #1
 crm> company add
 Name: Globex
-Website (blank for none):
+Website (optional):
 Added company #2
 crm> quit
-Goodbye! (3 commands this session)
+Goodbye! (2 commands this session)
 ```
 
 In the second terminal:
@@ -904,8 +1059,8 @@ $ grep '"name"' lab25-demo.json                          ← after quit
 ```
 
 Globex was added *after* the last tick. It's on disk only because `quit` triggered the final
-save. The `Loaded …` line and file size are from the reference implementation; your Lab 21
-message and byte count may differ.
+save. The banner lines and file size are from the reference implementation; your Lab 24
+wording and byte count may differ.
 
 Also check the flag validation:
 
@@ -1049,11 +1204,11 @@ same lock.** You'll need this in Your Turn 1.
 ```text
 crm> company add
 Name: Acme Corp
-Website (blank for none):
+Website (optional):
 Added company #1
 crm> company add
 Name: Globex
-Website (blank for none):
+Website (optional):
 Added company #2
 crm>
 thread '<unnamed>' (480149) panicked at src/cli/autosave.rs:28:9:
@@ -1061,7 +1216,7 @@ simulated bug in autosave
 note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
 company list
 
-thread 'main' (480144) panicked at src/cli/mod.rs:86:37:
+thread 'main' (480144) panicked at src/cli/mod.rs:85:45:
 called `Result::unwrap()` on an `Err` value: PoisonError { .. }
 ```
 
@@ -1093,7 +1248,7 @@ crm> [autosave] tick: waiting for the lock...
 company add
 Name: [autosave] tick: waiting for the lock...
 Acme Corp
-Website (blank for none):
+Website (optional):
 Added company #1
 crm> [autosave] done
 ```
@@ -1170,30 +1325,35 @@ Remove the logging when you're done (or keep it while you work through Your Turn
 
 <details><summary>Hint 2 (more specific)</summary>
 
-Handle `Command::Save` the same way you handle `Command::Quit`: in `repl`, *before*
-`let mut data = state.lock()…`. Give `repl` a second parameter `storage: &dyn Storage` and call
+Handle `Command::Save` the same way you handle `Command::Quit`: with its own `match` arm in
+`repl`, *before* the arm that calls `state.lock()…`. Give `repl` a second parameter `storage: &dyn Storage` and call
 it with `repl(&state, &*storage)`. `execute` never sees `Save`, so give it an arm that does
 nothing (`Command::Quit | Command::Save => {}`) to keep the `match` exhaustive.
 
 </details>
 
 > 💡 **HINT (Your Turn 2)**: a first attempt usually looks like `struct CountingStorage { saves: Cell<usize> }`.
-> Try it and read the error. It's the supertrait from Step 7 doing its job:
+> Try it and read the error. It's the supertrait from Step 7 doing its job, exactly as it did
+> for `RecordingStorage`:
 
 ```text
 error[E0277]: `Cell<usize>` cannot be shared between threads safely
-  --> src/cli/autosave.rs:72:22
+  --> src/cli/autosave.rs:76:22
    |
-72 |     impl Storage for CountingStorage {
+76 |     impl Storage for CountingStorage {
    |                      ^^^^^^^^^^^^^^^ `Cell<usize>` cannot be shared between threads safely
    |
    = help: within `CountingStorage`, the trait `Sync` is not implemented for `Cell<usize>`
    = note: if you want to do aliasing and mutation between multiple threads, use `std::sync::RwLock` or `std::sync::atomic::AtomicUsize` instead
 note: required because it appears within the type `CountingStorage`
-note: required by a bound in `storage::Storage`
-  --> src/storage/mod.rs:39:27
+  --> src/cli/autosave.rs:72:12
    |
-39 | pub trait Storage: Send + Sync {
+72 |     struct CountingStorage {
+   |            ^^^^^^^^^^^^^^^
+note: required by a bound in `storage::Storage`
+  --> src/storage/mod.rs:20:27
+   |
+20 | pub trait Storage: Send + Sync {
    |                           ^^^^ required by this bound in `Storage`
 ```
 

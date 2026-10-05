@@ -1134,8 +1134,8 @@ mod tests {
 ## Step 10 — Commands: `deal …` and `pipeline`
 
 The CLI only parses, prompts and prints. Every decision lives in `Crm` and `Deal` (Lab 14's
-rule). Your parser from Labs 14–17 probably differs from the one below in small ways. Match
-the *shape*, not the exact lines.
+rule). The snippets below slot into the Lab 14 parser and handlers as you extended them in
+Labs 15–17.
 
 > 🟢 **FOLLOW ALONG**: in `src/cli/parser.rs`, add two variants to `Command` and a new enum:
 
@@ -1157,14 +1157,17 @@ pub(crate) enum DealCommand {
 }
 ```
 
-Add the dispatch arms where you match on the first word:
+Add the dispatch arms to the slice match in `parse_command`, next to the `company` and
+`contact` arms:
 
 ```rust
-        "deal" => Command::Deal(parse_deal(&args)?),
-        "pipeline" => Command::Pipeline,
+        ["deal", rest @ ..] => Command::Deal(parse_deal(rest)?),
+        ["pipeline", ..] => Command::Pipeline,
 ```
 
-and the sub-parser. This one uses **slice patterns**, which fit command parsing well:
+`rest @ ..` binds everything after `deal` (possibly nothing) as a `&[&str]`. Then the
+sub-parser. Your `parse_company` matches on a `(sub, args)` pair; this one matches the **whole
+slice** in one pattern, which fits commands with a fixed shape well:
 
 ```rust
 fn parse_deal(args: &[&str]) -> Result<DealCommand, CrmError> {
@@ -1196,13 +1199,15 @@ first element equals `"move"`, and binds the other two (`id: &&str`, `stage: &&s
 auto-deref through both `&`s). `["show", ..]` matches `"show"` followed by *anything*, here used
 for the "wrong number of arguments" usage message. Arms are tried in order, so the exact shapes
 go first. Compare that with `args.get(1).and_then(...)` chains: the slice pattern shows the
-whole command at a glance.
+whole command at a glance. (A bare `deal` reaches `parse_deal` with an empty slice and falls
+through to the `USAGE` arm.)
 
 `stage.parse()?` uses `FromStr for DealStage`. Its `ValidationError` converts into `CrmError`
 through the `From` impl from Lab 12, so a typo like `deal move 3 closed` reports
 `invalid deal stage: 'closed'`, which is more useful than a generic usage line.
 
-(If your `CrmError::Usage` holds a `String` rather than `&'static str`, add `.to_string()`.)
+(The ids are parsed by hand here so each command can report its own usage line. Your Lab 15
+generic `parse_id` would work too, once `DealId` has its `From<u64>`, with its generic message.)
 
 Add parser tests to the existing `tests` module in `parser.rs`:
 
@@ -1228,7 +1233,7 @@ Add parser tests to the existing `tests` module in `parser.rs`:
         Command::Pipeline => print_pipeline(crm),
 ```
 
-and add the handlers (adjust the `prompt` import to wherever your helper lives):
+and add the handlers (`prompt` is already imported from `super`):
 
 ```rust
 use crate::money::Money;
@@ -1277,18 +1282,18 @@ fn print_pipeline(crm: &Crm) {
 }
 ```
 
-`crm.company(id)` is a lookup helper returning `Result<&Company, CrmError>`. If you don't have
-one from Lab 14, either add it (same shape as `Crm::deal`) or use
-`crm.companies.get(deal.company_id)` and handle the `Option`.
+`crm.company(id)` is Lab 14's lookup helper returning `Result<&Company, CrmError>`; `Crm::deal`
+has the same shape.
 
 `{:>14}` on `row.total` works **only because** `Display for Money` uses `f.pad`. Step 4 was for
 this line.
 
-Finally, add `deal` and `pipeline` to `print_help`:
+Finally, add a `Deals:` block to `print_help`, just before `Other:`:
 
 ```rust
+    println!("Deals:");
     println!("  deal add | list | show <id> | move <id> <stage>");
-    println!("  pipeline    deals and value per stage");
+    println!("  pipeline                    deals and value per stage");
 ```
 
 ---
@@ -1343,12 +1348,12 @@ quit
 ```text
 Rust CRM v0.1.0
 Type 'help' for a list of commands.
-crm> Name: Website (blank for none): Added company #1
-crm> Name: Website (blank for none): Added company #2
+crm> Name: Website (optional): Added company #1
+crm> Name: Website (optional): Added company #2
 crm> Company id: Title: Value (e.g. 1250.50): Added deal #1
 crm> Company id: Title: Value (e.g. 1250.50): Added deal #2
 crm> Company id: Title: Value (e.g. 1250.50): Added deal #3
-crm> Company id: Title: Value (e.g. 1250.50): Error: company #9 not found
+crm> Company id: Title: Value (e.g. 1250.50): Error: no company with id 9
 crm> Company id: Title: Value (e.g. 1250.50): Error: invalid amount: '12.345' (expected e.g. 1250 or 1250.50)
 crm> #1    Website redesign           $12,000.00  qualification  company #1
 #2    Support contract            $4,500.50  qualification  company #2

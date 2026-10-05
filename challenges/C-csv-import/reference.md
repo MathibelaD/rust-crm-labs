@@ -248,21 +248,21 @@ Reasoning:
 ## 4. The CLI is three small changes
 
 ```rust
-// parser.rs, inside parse_command's match
-"import" => match args {
-    [path] => Command::Import { path },
-    _ => return Err(CliError::Usage("import <path.csv>")),
-},
+// parser.rs, inside parse_command's `match words.as_slice()`
+["import", path] => Command::Import { path },
+["import", ..] => return Err(CliError::Usage("import <path.csv>")),
 ```
 
-Slice patterns (`[path]`) match "exactly one argument" in one arm. Lab 09's slices meet Lab 11's
-patterns.
+Slice patterns (`["import", path]`) match "exactly one argument" in one arm, the same style as
+`["history", subject]` from Lab 20. Lab 09's slices meet Lab 11's patterns. (`Command` gains
+`Import { path: &'a str }`: the path borrows from the input line, like `ContactCommand::Search`.)
 
 ```rust
-// commands.rs, inside execute
+// commands.rs, inside execute (plus `use std::path::Path;`, `use crate::import;` and
+// `error_chain` in the `use crate::errors::{…}` line)
 Command::Import { path } => {
-    let report = import::import_contacts_file(crm, Path::new(path))
-        .map_err(CliError::Import)?;
+    let report =
+        import::import_contacts_file(crm, Path::new(path)).map_err(CliError::Import)?;
     println!("{}", report.summary());
     for skipped in &report.skipped {
         println!("  line {}: {}", skipped.line, error_chain(&skipped.problem));

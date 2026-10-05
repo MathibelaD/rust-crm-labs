@@ -834,8 +834,9 @@ impl From<&User> for UserResponse {
   `#[derive(Debug)]` on the whole request is now **safe**. You'll prove that in a test.
 - `UserResponse` is built *from* `User`, which has no hash. There's nothing to leak.
 
-> `FieldError` (with `FieldError::new(field, message)`) and the `AppJson` extractor are the ones
-> you built in Lab 28. Adjust the import paths if yours live elsewhere.
+> `FieldError` (pub fields `field: &'static str, message: String`, plus Lab 28's
+> `FieldError::new(field, message)` helper) and the `AppJson` extractor are the ones you built in
+> Lab 28. The solutions write `FieldError { field, message }` literals; `FieldError::new` is equivalent.
 
 ### The handler
 
@@ -1009,7 +1010,7 @@ content-type: application/json
 ```
 
 ```json
-{"error":{"code":"validation_failed","message":"request has invalid fields","fields":[{"field":"email","message":"invalid email address 'nope'"},{"field":"name","message":"must not be empty"},{"field":"password","message":"must be between 12 and 128 characters"}]}}
+{"error":{"code":"validation_failed","message":"request has invalid fields","fields":[{"field":"email","message":"invalid email address: nope"},{"field":"name","message":"must not be empty"},{"field":"password","message":"must be between 12 and 128 characters"}]}}
 ```
 
 ```text

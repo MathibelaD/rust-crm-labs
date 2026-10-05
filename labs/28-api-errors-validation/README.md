@@ -40,15 +40,14 @@ content-length: 87
 Failed to parse the request body as JSON: EOF while parsing a value at line 1 column 16
 
 $ curl -i localhost:3000/companies -H 'content-type: application/json' -d '{"name": "   "}'
-HTTP/1.1 201 Created
-content-type: application/json
-content-length: 59
+HTTP/1.1 422 Unprocessable Entity
+content-length: 0
 
-{"id":1,"name":"   ","website":null,"lifecycle":"prospect"}
 ```
 
-An empty body, a plain-text body, and a company called `"   "` that was happily created. A
-frontend developer would have to special-case every endpoint. By the end of this lab every error
+An empty body, a plain-text body, and a 422 that doesn't say *what* was wrong (your Lab 15
+`validate()` rejected the blank name, and Lab 27's handler threw the message away). A frontend
+developer would have to special-case every endpoint. By the end of this lab every error
 looks like this:
 
 ```json
@@ -70,7 +69,7 @@ looks like this:
 |---|---|---|
 | Request can't be read: malformed JSON, wrong JSON types, wrong content type, bad path or query parameter | **400** | `bad_request` |
 | Entity doesn't exist (`CrmError::NotFound`) | **404** | `not_found` |
-| Business rule conflict: duplicate email, company still has contacts, lead not qualified | **409** | `conflict` |
+| Business rule conflict: duplicate email, company still has contacts, lead not qualified or disqualified | **409** | `conflict` |
 | Deal stage move not allowed (`CrmError::InvalidTransition`) | **409** | `invalid_transition` |
 | Request was readable but its fields are invalid | **422** | `validation_failed` (+ `fields`) |
 | Anything that is *our* fault (disk full, bug) | **500** | `internal`, with a generic message |
@@ -85,9 +84,11 @@ GET    /contacts             POST /contacts                                   �
 GET    /contacts/{id}        PUT  /contacts/{id}     DELETE /contacts/{id}    ← Your Turn
 ```
 
-> This lab assumes you completed the Your Turn in **Lab 27** (`GET /contacts` and
-> `GET /contacts/{id}` with a `ContactResponse` DTO). See
-> [Lab 27's solutions.md](../27-axum-basics/solutions.md) if not.
+> This lab assumes you completed the Your Turns in **Lab 27**: `src/http/contacts.rs` with
+> `GET /contacts` and `GET /contacts/{id}` (and a `ContactResponse` DTO), and
+> `DELETE /companies/{id}` with its hand-written `match` from `CrmError` to `StatusCode`. See
+> [Lab 27's solutions.md](../27-axum-basics/solutions.md) if not. This lab replaces that `match`
+> with one central mapping.
 
 > Written against **axum 0.8** (0.8.9), **serde 1**, **anyhow 1** and **thiserror 2**. Axum
 > changes more between minor versions than most crates. If an API looks different, check
@@ -142,6 +143,8 @@ First enable axum's `macros` feature. You'll use two of its macros in this lab
 ```bash
 cargo add axum --features macros
 ```
+
+(If you kept the feature from Lab 27's `debug_handler` experiment, this changes nothing.)
 
 Now design the type. Every handler failure belongs to one of four groups:
 
@@ -204,8 +207,8 @@ pub mod error;
 pub use error::{ApiError, FieldError};
 ```
 
-(`JsonRejection`, `StorageError` and `IntoResponse` will show "unused import" warnings until
-later steps. That's fine.)
+(`Json`, `JsonRejection`, `StatusCode`, `IntoResponse`, `Response` and `StorageError` will show
+"unused import" warnings until later steps. That's fine.)
 
 A few design decisions to notice:
 
@@ -258,9 +261,9 @@ You get **two** errors. Look at the one that points at the router first:
 
 ```text
 error[E0277]: the trait bound `fn(State<AppState>, Path<u64>) -> _ {get_company}: Handler<_, _>` is not satisfied
-   --> src/http/mod.rs:23:17
+   --> src/http/mod.rs:25:17
     |
- 23 |             get(companies::get_company)
+ 25 |             get(companies::get_company).delete(companies::delete_company),
     |             --- ^^^^^^^^^^^^^^^^^^^^^^ the trait `Handler<_, _>` is not implemented for fn item `fn(State<AppState>, Path<u64>) -> _ {get_company}`
     |             |
     |             required by a bound introduced by this call
@@ -278,17 +281,20 @@ and run `cargo check` again:
 
 ```text
 error[E0277]: the trait bound `ApiError: IntoResponse` is not satisfied
-   --> src/http/companies.rs:137:6
-    |
-137 | ) -> Result<Json<CompanyResponse>, ApiError> {
-    |      ^^^^^^ unsatisfied trait bound
-    |
+  --> src/http/companies.rs:51:6
+   |
+51 | ) -> Result<Json<CompanyResponse>, ApiError> {
+   |      ^^^^^^ unsatisfied trait bound
+   |
 help: the trait `IntoResponse` is not implemented for `ApiError`
-   --> src/http/error.rs:27:1
-    |
- 27 | pub enum ApiError {
-    | ^^^^^^^^^^^^^^^^^
-    = note: required for `Result<Json<CompanyResponse>, ApiError>` to implement `IntoResponse`
+  --> src/http/error.rs:30:1
+   |
+30 | pub enum ApiError {
+   | ^^^^^^^^^^^^^^^^^
+   = help: the following other types implement trait `IntoResponse`:
+             ()
+             (R,)
+   …
 ```
 
 (Line numbers will differ.) Now it's precise: `Result<T, E>` is a response only if `E` is, and
@@ -327,13 +333,10 @@ impl ApiError {
                 CrmError::NotFound { .. } => (StatusCode::NOT_FOUND, "not_found"),
                 CrmError::DuplicateEmail(_)
                 | CrmError::HasContacts(_)
-                | CrmError::LeadNotQualified(_) => (StatusCode::CONFLICT, "conflict"),
+                | CrmError::LeadNotQualified(_)
+                | CrmError::LeadDisqualified(_) => (StatusCode::CONFLICT, "conflict"),
                 CrmError::InvalidTransition { .. } => (StatusCode::CONFLICT, "invalid_transition"),
                 CrmError::Validation(_) => (StatusCode::UNPROCESSABLE_ENTITY, "validation_failed"),
-                // CLI-only variants: if one reaches HTTP, that's a bug on our side.
-                CrmError::UnknownCommand(_) | CrmError::Usage(_) => {
-                    (StatusCode::INTERNAL_SERVER_ERROR, "internal")
-                }
             },
             ApiError::Validation(_) => (StatusCode::UNPROCESSABLE_ENTITY, "validation_failed"),
             ApiError::BadRequest(_) => (StatusCode::BAD_REQUEST, "bad_request"),
@@ -372,10 +375,14 @@ impl IntoResponse for ApiError {
 }
 ```
 
-> ⚠️ **Your `CrmError` variants may differ slightly.** Lab 22 allowed you to move
-> `UnknownCommand` and `Usage` into a `cli::CliError`. If you did, delete that arm. If your
-> `CrmError` has variants this match doesn't list, the compiler will tell you (that's the
-> point; see the Experiment section). Decide a status for each.
+> ⚠️ **This match lists every `CrmError` variant you have after Lab 27:** `NotFound`,
+> `DuplicateEmail`, `Validation`, `HasContacts`, `InvalidTransition`, `LeadNotQualified` and
+> `LeadDisqualified`. There's no arm for "unknown command" or "usage" errors: Lab 22 moved those
+> into the CLI's own `CliError`, so they can't reach HTTP at all. That's one more reason that
+> split was worth it. Every `ValidationError` (`EmptyName`, `InvalidEmail`, `InvalidValue`, …)
+> arrives as `CrmError::Validation` and becomes a 422. If your `CrmError` has variants this
+> match doesn't list, the compiler will tell you (that's the point; see the Experiment
+> section). Decide a status for each.
 
 Read it slowly. Everything about "error → HTTP" is in these ~50 lines:
 
@@ -451,13 +458,13 @@ impl From<anyhow::Error> for ApiError {
 
 ```text
 error[E0277]: `?` couldn't convert the error to `ApiError`
-   --> src/http/companies.rs:145:7
+   --> src/http/companies.rs:56:7
     |
-142 |       let company = crm.companies.get(CompanyId(id)).ok_or(CrmError::NotFound {
+ 53 |       let company = crm.companies.get(CompanyId(id)).ok_or(CrmError::NotFound {
     |  ____________________________________________________-
-143 | |         entity: "company",
-144 | |         id,
-145 | |     })?;
+ 54 | |         entity: "company",
+ 55 | |         id,
+ 56 | |     })?;
     | |      -^ the trait `From<CrmError>` is not implemented for `ApiError`
     | |______|
     |        this can't be annotated with `?` because it has type `Result<_, CrmError>`
@@ -468,10 +475,14 @@ note: `ApiError` needs to implement `From<CrmError>`
  30 | pub enum ApiError {
     | ^^^^^^^^^^^^^^^^^
     = note: the question mark operation (`?`) implicitly performs a conversion on the error value using the `From` trait
-    = help: `ApiError` implements trait `From<T>`:
-              From<StorageError>
-              From<Vec<FieldError>>
-              From<anyhow::Error>
+help: `ApiError` implements trait `From<T>`
+   --> src/http/error.rs:108:1
+    |
+108 | impl From<Vec<FieldError>> for ApiError {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `From<Vec<FieldError>>`
+...
+114 | impl From<StorageError> for ApiError {
+    …
 ```
 
 The compiler even tells you the desugaring: "`?` implicitly performs a conversion using the
@@ -516,24 +527,26 @@ exactly what `ApiError` is: a local type wrapping foreign errors.
 ## Step 6 — Never leak internals on 500
 
 Every mutating handler ends with `state.persist().await`. That's the call that can fail for
-reasons the client has nothing to do with. Check your `AppState::persist` from Lab 27. For `?`
-to work in handlers, its error type must be one `ApiError` can absorb. This lab assumes:
+reasons the client has nothing to do with. For `?` to work in handlers, its error type must be
+one `ApiError` can absorb. Your Lab 27 `AppState::persist` is unchanged:
 
 ```rust
-// src/http/state.rs
-pub async fn persist(&self) -> anyhow::Result<()> {
-    let snapshot = self.crm.read().expect("crm lock poisoned").clone();
-    let storage = Arc::clone(&self.storage);
-    tokio::task::spawn_blocking(move || storage.save(&snapshot)).await??;
-    Ok(())
+// src/http/state.rs (from Lab 27)
+pub async fn persist(&self) -> Result<(), StorageError> {
+    let state = self.clone();
+    task::spawn_blocking(move || {
+        let crm = state.crm.read().expect("CRM lock poisoned");
+        state.storage.save(&crm)
+    })
+    .await
+    .expect("persist task panicked")
 }
 ```
 
-If yours returns `Result<(), StorageError>`, that also works thanks to the `From<StorageError>`
-impl. If it returns something else, change it to `anyhow::Result<()>`. The `.await??` unwraps two
-layers: `spawn_blocking` gives `Result<Result<(), StorageError>, JoinError>`. The first `?` handles
-a panicked save task (`JoinError`), the second the storage error. Both convert into
-`anyhow::Error`.
+It returns `Result<(), StorageError>`, and the `From<StorageError> for ApiError` impl from Step 5
+is exactly what lets a handler write `state.persist().await?`: the storage error becomes
+`ApiError::Internal`. (`Crm` isn't `Clone`, which is why Lab 27 takes the read lock *inside* the
+blocking task instead of saving a cloned snapshot. Leave it that way.)
 
 Now look again at the rule in `into_response`:
 
@@ -546,8 +559,8 @@ let message = if status.is_server_error() {
 };
 ```
 
-It's keyed on the **status**, not the variant. Any path that ends up as a 5xx (an
-`Internal`, or a CLI-only `CrmError` that should never reach HTTP) gets a generic message. The
+It's keyed on the **status**, not the variant. Any path that ends up as a 5xx (today only
+`Internal`, tomorrow perhaps a database variant you map to 500) gets a generic message. The
 full message goes to the server's stderr instead. (In Lab 37 `eprintln!` becomes
 `tracing::error!` with a request ID, so you can match a user's complaint to a log line.)
 
@@ -669,7 +682,7 @@ even compile here, and what to do instead.
 
 ```rust
 use super::error::{ApiError, FieldError};
-use crate::companies::{Company, CompanyFilter, CompanyId, CompanyUpdate, Lifecycle, NewCompany};
+use crate::companies::{Company, CompanyId, CompanyUpdate, Lifecycle, NewCompany};
 
 #[derive(Debug, Deserialize)]
 pub struct CreateCompanyRequest {
@@ -726,15 +739,17 @@ impl TryFrom<CreateCompanyRequest> for NewCompany {
 
 ```text
 error[E0277]: `?` couldn't convert the error to `Vec<FieldError>`
-  --> src/http/companies.rs:83:44
-   |
-83 |         let name = validate_name(&req.name)?;
-   |                    ------------------------^ the trait `From<FieldError>` is not implemented for `Vec<FieldError>`
-   |                    |
-   |                    this can't be annotated with `?` because it has type `Result<_, FieldError>`
-   |
+   --> src/http/companies.rs:133:44
+    |
+133 |         let name = validate_name(&req.name)?;
+    |                    ------------------------^ the trait `From<FieldError>` is not implemented for `Vec<FieldError>`
+    |                    |
+    |                    this can't be annotated with `?` because it has type `Result<_, FieldError>`
+    |
 note: `FieldError` needs to implement `Into<Vec<FieldError>>`
 ```
+
+(and the same for `validate_website(...)?`)
 
 Same lesson as Step 5: `?` needs a `From`. You *could* write
 `impl From<FieldError> for Vec<FieldError>` (the orphan rule allows it, because `FieldError` is
@@ -826,7 +841,8 @@ mod tests {
 
     #[test]
     fn valid_request_is_trimmed_into_new_company() {
-        let new = NewCompany::try_from(request("  Acme  ", Some(" https://acme.example "))).unwrap();
+        let new =
+            NewCompany::try_from(request("  Acme  ", Some(" https://acme.example "))).unwrap();
         assert_eq!(new.name, "Acme");
         assert_eq!(new.website.as_deref(), Some("https://acme.example"));
     }
@@ -859,13 +875,8 @@ Make the domain API say what it needs. In `src/crm.rs`, change `add_company` to 
 use crate::companies::{Company, CompanyFilter, CompanyId, CompanyUpdate, Lifecycle, NewCompany};
 
     pub fn add_company(&mut self, new: NewCompany) -> Result<CompanyId, CrmError> {
-        let id = self.companies.next_id();
-        let company = Company {
-            id,
-            name: new.name,
-            website: new.website,
-            lifecycle: Lifecycle::Prospect,
-        };
+        let company = Company::new(self.companies.next_id(), new.name, new.website);
+        company.validate()?;
         Ok(self.companies.insert(company))
     }
 
@@ -874,10 +885,10 @@ use crate::companies::{Company, CompanyFilter, CompanyId, CompanyUpdate, Lifecyc
         id: CompanyId,
         update: CompanyUpdate,
     ) -> Result<&Company, CrmError> {
-        let company = self
-            .companies
-            .get_mut(id)
-            .ok_or(CrmError::NotFound { entity: "company", id: id.0 })?;
+        let company = self.companies.get_mut(id).ok_or(CrmError::NotFound {
+            entity: "company",
+            id: id.0,
+        })?;
         company.name = update.name;
         company.website = update.website;
         company.lifecycle = update.lifecycle;
@@ -885,36 +896,46 @@ use crate::companies::{Company, CompanyFilter, CompanyId, CompanyUpdate, Lifecyc
     }
 ```
 
-(Adapt the `Company { .. }` literal to your struct if Lab 27 left it different. The point is the
-signature.)
+(Only the signature and the first line of `add_company` change. Keep your Lab 15
+`company.validate()?`: the domain still guards its own invariants, even though the HTTP boundary
+now checks first.)
 
 > ✍️ **This is an allowed signature change** to the `Crm` API from Lab 14. From now on
 > `Crm::add_company(&mut self, new: NewCompany)`. Lab 30 builds on this: the Postgres insert
 > takes `&NewCompany` too.
 
-Now run `cargo check --all-targets` (`--all-targets` includes `tests/` and the `crm-cli`
-binary). Every old call site breaks:
+Now run `cargo check --all-targets` (`--all-targets` includes `tests/`, the unit tests and the
+`crm-cli` binary). Every old call site breaks:
 
 ```text
 error[E0061]: this method takes 1 argument but 2 arguments were supplied
-  --> src/cli/commands.rs:9:26
+  --> src/cli/commands.rs:93:49
    |
- 9 |             let id = crm.add_company(name.to_string(), None)?;
-   |                          ^^^^^^^^^^^ ----------------  ---- unexpected argument #2 of type `std::option::Option<_>`
-   |                                      |
-   |                                      expected `NewCompany`, found `String`
+93 |             let id = write_crm(state, |crm| crm.add_company(name, website))?;
+   |                                                 ^^^^^^^^^^^ ----  ------- unexpected argument #2 of type `std::option::Option<std::string::String>`
+   |                                                             |
+   |                                                             expected `NewCompany`, found `String`
    |
 note: method defined here
-  --> src/crm.rs:60:12
+  --> src/crm.rs:55:12
    |
-60 |     pub fn add_company(&mut self, new: NewCompany) -> Result<CompanyId, CrmError> {
+55 |     pub fn add_company(&mut self, new: NewCompany) -> Result<CompanyId, CrmError> {
    |            ^^^^^^^^^^^            ---------------
 ```
 
 This is the compiler doing your refactoring checklist. Fix each one by building the struct, e.g.
-`crm.add_company(NewCompany { name, website })`. Expect hits in your CLI command code and in
-`tests/common/mod.rs` (`sample_crm`). Don't touch the CLI's own validation: it still goes through
-whatever prompts and checks Lab 14 gave it. The CLI is retired in Lab 30, so don't polish it.
+`crm.add_company(NewCompany { name, website })` inside the CLI's `write_crm` closure. Expect hits
+in waves (the compiler checks the library before the test targets that depend on it):
+
+- `src/cli/commands.rs` (`company add`) and `src/http/companies.rs` (`create_company`, which
+  Step 10 rewrites anyway)
+- the unit tests that build a CRM: in `src/crm.rs`, `src/history.rs`, `src/stats.rs`,
+  `src/deals/report.rs`, `src/storage/memory.rs` and `src/storage/json_file.rs` (each test
+  module needs `NewCompany` in its `use crate::companies::{…}` line)
+- `tests/common/mod.rs` (`sample_crm`) and `tests/persistence.rs` (`ids_continue_after_reload`)
+
+Don't touch the CLI's own validation: it still goes through whatever prompts and checks Lab 26
+gave it. The CLI is retired in Lab 30, so don't polish it.
 
 > 💡 `NewCompany`'s fields are `pub`, so nothing *forces* callers through `TryFrom`. The CLI and
 > tests build it directly. That's the same trade-off Lab 18 made for `Deal::stage`: public fields
@@ -941,7 +962,7 @@ use serde::{Deserialize, Serialize};
 use super::AppState;
 use super::error::{ApiError, FieldError};
 use super::extract::AppJson;
-use crate::companies::{Company, CompanyFilter, CompanyId, CompanyUpdate, Lifecycle, NewCompany};
+use crate::companies::{Company, CompanyId, CompanyUpdate, Lifecycle, NewCompany};
 use crate::errors::CrmError;
 
 // (DTOs, From<&Company> for CompanyResponse, validation and TryFrom impls as above)
@@ -996,9 +1017,11 @@ pub async fn delete_company(
 }
 ```
 
-`list_companies` doesn't change in this lab (it can't fail). Your Lab 14 `remove_company`
-returns an error when the company still has contacts (`CrmError::HasContacts`). If your version
-returns the removed `Company`, the `?` just discards it.
+`list_companies` doesn't change in this lab (it can't fail). `delete_company` **replaces** your
+Lab 27 version: its hand-written `match` (`NotFound` → 404, `HasContacts` → 409, `_` → 500) is
+gone, because `?` now sends every `CrmError` through `status_and_code`, which has no wildcard.
+Your Lab 14 `remove_company` returns `CrmError::HasContacts` when the company still has contacts,
+and the removed `Company` on success; the `?` just discards it.
 
 Two patterns to notice:
 
@@ -1105,7 +1128,7 @@ HTTP/1.1 404 Not Found
 content-type: application/json
 content-length: 64
 
-{"error":{"code":"not_found","message":"company #99 not found"}}
+{"error":{"code":"not_found","message":"no company with id 99"}}
 
 HTTP/1.1 200 OK
 content-type: application/json
@@ -1125,7 +1148,7 @@ HTTP/1.1 404 Not Found
 content-type: application/json
 content-length: 63
 
-{"error":{"code":"not_found","message":"company #1 not found"}}
+{"error":{"code":"not_found","message":"no company with id 1"}}
 
 HTTP/1.1 400 Bad Request
 content-type: text/plain; charset=utf-8
@@ -1150,7 +1173,8 @@ content-length: 63
 …while the **server's** terminal shows the real cause:
 
 ```text
-Listening on http://127.0.0.1:3000
+Loaded 0 companies and 0 contacts from /no/such/dir/crm-data.json
+Rust CRM API v0.1.0 listening on http://127.0.0.1:3000
 internal error: could not write /no/such/dir/crm-data.json: No such file or directory (os error 2)
 ```
 
@@ -1257,7 +1281,10 @@ error and it might include a hostname, a table name or a fragment of SQL. Restor
 >    ```
 > 2. Change `Crm::add_contact` to `pub fn add_contact(&mut self, new: NewContact) -> Result<ContactId, CrmError>`
 >    (same rules as before: company must exist → `NotFound`, email must be unique →
->    `DuplicateEmail`). Fix every call site the compiler shows you.
+>    `DuplicateEmail`, and keep `contact.validate()?`). Fix every call site the compiler shows
+>    you: the CLI's `contact add`, the unit tests in `crm.rs`, `history.rs`, `stats.rs`,
+>    `contacts/queries.rs` and `storage/json_file.rs`, `sample_crm`, and two tests in
+>    `tests/validation.rs`.
 > 3. In `src/http/contacts.rs` define
 >    ```rust
 >    #[derive(Debug, Deserialize)]
@@ -1274,8 +1301,9 @@ error and it might include a hostname, a table name or a fragment of SQL. Restor
 > - **name**: trimmed, must not be empty.
 > - **email**: must pass `Email::try_from` (your Lab 15 rules); the message is the
 >   `ValidationError`'s `Display`.
-> - **phone**: missing or blank → `None`. Otherwise it may contain only digits, spaces and
->   `+ - ( ) .`, and must contain at least 7 digits. Keep it trimmed.
+> - **phone**: missing → `None`. Otherwise it must pass your `parse_phone` (Lab 12: blank →
+>   `None`, otherwise only digits, spaces and `+ - ( )`, at least 7 digits, trimmed); the message
+>   is the `ValidationError`'s `Display`.
 > - `company_id` is passed through (`CompanyId`); whether it exists is the domain's job.
 >
 > Acceptance criteria:
@@ -1291,10 +1319,12 @@ error and it might include a hostname, a table name or a fragment of SQL. Restor
 > `GET /contacts/{id}` to `ApiError`), following the company handlers' shape:
 > - `POST` → **201** with the `ContactResponse`.
 > - `PUT` replaces name, email, phone and company. Its body has exactly the create shape (name
->   the type `UpdateContactRequest`; how you define it is up to you). Add
->   `Crm::update_contact(&mut self, id: ContactId, update: NewContact) -> Result<&Contact, CrmError>`:
+>   the type `UpdateContactRequest`; how you define it is up to you). Your Lab 14
+>   `Crm::update_contact` is a *partial* edit (each field an `Option`, `None` = keep) that the CLI
+>   still uses, so leave it alone and add
+>   `Crm::replace_contact(&mut self, id: ContactId, update: NewContact) -> Result<&Contact, CrmError>`:
 >   `NotFound` for an unknown contact or company, `DuplicateEmail` if **another** contact has the
->   email (keeping your own email is fine).
+>   email (keeping your own email is fine), and the replacement still passes `validate()`.
 > - `DELETE` → **204** (use your existing `remove_contact`).
 >
 > With a fresh data file and one company created (`{"name":"Acme Corp"}` → id 1), these must
@@ -1305,22 +1335,22 @@ POST /contacts {"name":"Ada Lovelace","email":"ADA@Acme.example","phone":"+1 555
 → 201 {"id":1,"name":"Ada Lovelace","email":"ada@acme.example","phone":"+1 555 0100","company_id":1}
 
 POST /contacts {"name":"","email":"not-an-email","phone":"call me"}
-→ 422 {"error":{"code":"validation_failed","message":"request has invalid fields","fields":[{"field":"name","message":"must not be empty"},{"field":"email","message":"invalid email address: not-an-email"},{"field":"phone","message":"must contain at least 7 digits and only digits, spaces and + - ( ) ."}]}}
+→ 422 {"error":{"code":"validation_failed","message":"request has invalid fields","fields":[{"field":"name","message":"must not be empty"},{"field":"email","message":"'not-an-email' is not a valid email address"},{"field":"phone","message":"'call me' is not a valid phone number"}]}}
 
 POST /contacts {"name":"Ada Again","email":"ada@acme.example"}
 → 409 {"error":{"code":"conflict","message":"a contact with email ada@acme.example already exists"}}
 
 POST /contacts {"name":"Bob","email":"bob@acme.example","company_id":42}
-→ 404 {"error":{"code":"not_found","message":"company #42 not found"}}
+→ 404 {"error":{"code":"not_found","message":"no company with id 42"}}
 
 DELETE /companies/1
-→ 409 {"error":{"code":"conflict","message":"company #1 still has contacts"}}
+→ 409 {"error":{"code":"conflict","message":"company #1 still has contacts; delete them first"}}
 
 PUT /contacts/1 {"name":"Ada King","email":"ada@acme.example","phone":null,"company_id":1}
 → 200 {"id":1,"name":"Ada King","email":"ada@acme.example","phone":null,"company_id":1}
 
 GET /contacts/7
-→ 404 {"error":{"code":"not_found","message":"contact #7 not found"}}
+→ 404 {"error":{"code":"not_found","message":"no contact with id 7"}}
 ```
 
 > - [ ] Plus: after creating `bob@acme.example` as contact 2, `PUT /contacts/2` with Ada's

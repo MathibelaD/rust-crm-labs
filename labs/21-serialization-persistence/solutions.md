@@ -52,7 +52,7 @@ impl Command<'_> {
                 DealCommand::Add | DealCommand::Move { .. } => true,
             },
             Command::Lead(c) => match c {
-                LeadCommand::List => false,
+                LeadCommand::List(_) => false,
                 LeadCommand::Add
                 | LeadCommand::Qualify { .. }
                 | LeadCommand::Disqualify { .. }
@@ -239,7 +239,7 @@ gets real migrations.
 
 **Experiment 1: who wrote which part of the message?**
 `Error: could not load crm-data.json: ` is your REPL. `data file is not valid: ` is your `Display`
-for `CrmError::Json`. `invalid email address 'ada at acme'` is your `ValidationError`, which serde
+for `CrmError::Json`. `'ada at acme' is not a valid email address` is your `ValidationError`, which serde
 took from the `TryFrom<String>` error via `Display`. `at line 18 column 31` is serde_json adding
 the position. Four layers, one line. Lab 22 makes this layering explicit.
 

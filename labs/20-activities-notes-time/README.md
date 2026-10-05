@@ -1001,33 +1001,29 @@ use crate::subject::Subject;
     History { subject: Subject },
 ```
 
-and three dispatch arms in `parse_command` (where `args` is your `Vec<&str>` of the words
-after the command name):
+and six arms to the slice match in `parse_command` (anywhere before the final
+`[other, ..]` catch-all). Each command gets one arm for the valid shape and one for "anything
+else", which reports the usage line:
 
 ```rust
-        "activity" => match args.as_slice() {
-            ["log", subject] => Command::LogActivity {
-                subject: subject.parse()?,
-            },
-            _ => return Err(CrmError::Usage("activity log <subject>")),
+        ["activity", "log", subject] => Command::LogActivity {
+            subject: subject.parse()?,
         },
-        "note" => match args.as_slice() {
-            ["add", subject, words @ ..] if !words.is_empty() => Command::AddNote {
-                subject: subject.parse()?,
-                body: words.join(" "),
-            },
-            _ => return Err(CrmError::Usage("note add <subject> <text...>")),
+        ["activity", ..] => return Err(CrmError::Usage("activity log <subject>")),
+        ["note", "add", subject, words @ ..] if !words.is_empty() => Command::AddNote {
+            subject: subject.parse()?,
+            body: words.join(" "),
         },
-        "history" => match args.as_slice() {
-            [subject] => Command::History {
-                subject: subject.parse()?,
-            },
-            _ => return Err(CrmError::Usage("history <subject>")),
+        ["note", ..] => return Err(CrmError::Usage("note add <subject> <text...>")),
+        ["history", subject] => Command::History {
+            subject: subject.parse()?,
         },
+        ["history", ..] => return Err(CrmError::Usage("history <subject>")),
 ```
 
-- `["add", subject, words @ ..] if !words.is_empty()`: a slice pattern with a **rest
-  binding** and a **guard**. `words` is a `&[&str]` of everything after the subject.
+- `["note", "add", subject, words @ ..] if !words.is_empty()`: a slice pattern with a **rest
+  binding** and a **guard**. If the guard fails, matching continues with the next arm, so
+  `note add deal:2` (no text) falls through to `["note", ..]` and its usage error. `words` is a `&[&str]` of everything after the subject.
 - `words.join(" ")` allocates a new `String`. The body isn't one contiguous slice of the input
   anymore (we split on whitespace, so `"a   demo"` becomes `"a demo"`). That's why `AddNote`
   holds an owned `String` rather than a `&'a str`.
@@ -1139,12 +1135,13 @@ Ownership details worth a second look:
 - The prompt already offers `meeting`. That's a promise you keep in Your Turn 3. Until then,
   `meeting` falls into `_` and is rejected.
 
-Add the three commands to `print_help`:
+Add the three commands to `print_help`, in a block before `Other:`:
 
 ```rust
-    println!("  activity log <subject>          subject = company:<id> | contact:<id> | deal:<id>");
+    println!("Activities and notes (subject = company:<id> | contact:<id> | deal:<id>):");
+    println!("  activity log <subject>      log a call, email or meeting");
     println!("  note add <subject> <text...>");
-    println!("  history <subject>               activities and notes, newest first");
+    println!("  history <subject>           activities and notes, newest first");
 ```
 
 ---
@@ -1197,27 +1194,26 @@ quit
 ```text
 Rust CRM v0.1.0
 Type 'help' for a list of commands.
-crm> Name: Website (blank for none): Added company #1
-crm> Name: Email: Phone (blank for none): Company id (blank for none): Added contact #1
+crm> Name: Website (optional): Added company #1
+crm> Name: Email: Phone (optional): Company id (blank for none): Added contact #1
 crm> Company id: Title: Value (e.g. 1250.50): Added deal #1
 crm> Kind (call/email/meeting): Duration in minutes: Summary: When (YYYY-MM-DD HH:MM, UTC; blank for now): Logged activity #1 on deal:1
 crm> Kind (call/email/meeting): Email subject: Summary: When (YYYY-MM-DD HH:MM, UTC; blank for now): Logged activity #2 on deal:1
-crm> Error: deal #9 not found
+crm> Error: no deal with id 9
 crm> Kind (call/email/meeting): Error: invalid activity kind: 'fax'
 crm> Kind (call/email/meeting): Duration in minutes: Error: invalid duration in minutes: 'half an hour'
 crm> Added note #1 to deal:1
-crm> Error: Usage: note add <subject> <text...>
+crm> Error: usage: note add <subject> <text...>
 crm> 2026-10-05 15:10  email "Proposal v1": Sent the proposal
 2026-10-05 14:48  note: Wants a demo before signing
 2026-10-05 09:30  call (25 min): Discovery call, budget confirmed
 crm> No history for contact:1 yet.
 crm> Error: invalid subject (expected e.g. company:3, contact:5 or deal:2): 'lead:1'
-crm> Goodbye! (12 commands this session)
+crm> Goodbye! (13 commands this session)
 ```
 
 The note's time is **your current UTC time**, so it lands wherever "now" falls relative to
-09:30 and 15:10. Everything else should match exactly (your `Usage` wording may differ
-slightly, depending on your Lab 12 `Display`).
+09:30 and 15:10. Everything else should match exactly.
 
 Check:
 
@@ -1475,7 +1471,7 @@ first).
 >   no `mut`.
 
 - [ ] Unit tests for `parse_contact_ids` (valid list, blank, one bad part) and for `parse_datetime`
-- [ ] Logging a meeting with attendee `7` (nonexistent) prints `Error: contact #7 not found`
+- [ ] Logging a meeting with attendee `7` (nonexistent) prints `Error: no contact with id 7`
       (that's Your Turn 1 at work)
 - [ ] `history company:1` shows `meeting at 2026-10-07 14:00 UTC (2 attendees): On-site demo`
 

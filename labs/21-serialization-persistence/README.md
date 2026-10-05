@@ -117,7 +117,7 @@ use serde::{Deserialize, Serialize};
 
 // ...
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Company {
     pub id: CompanyId,
     pub name: String,
@@ -130,18 +130,18 @@ pub struct Company {
 
 ```text
 error[E0277]: the trait bound `CompanyId: serde::Serialize` is not satisfied
-    --> src/companies/model.rs:54:24
+    --> src/companies/model.rs:63:35
      |
-  54 | #[derive(Debug, Clone, Serialize, Deserialize)]
-     |                        ^^^^^^^^^ unsatisfied trait bound
-  55 | pub struct Company {
-  56 |     pub id: CompanyId,
+  63 | #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+     |                                   ^^^^^^^^^ unsatisfied trait bound
+  64 | pub struct Company {
+  65 |     pub id: CompanyId,
      |     --- required by a bound introduced by this call
      |
 help: the trait `Serialize` is not implemented for `CompanyId`
-    --> src/companies/model.rs:10:1
+    --> src/companies/model.rs:11:1
      |
-  10 | pub struct CompanyId(pub u64);
+  11 | pub struct CompanyId(pub u64);
      | ^^^^^^^^^^^^^^^^^^^^
      = note: for local types consider adding `#[derive(serde::Serialize)]` to your `CompanyId` type
      = note: for types from other crates check whether the crate offers a `serde` feature flag
@@ -162,7 +162,7 @@ error[E0277]: the trait bound `Lifecycle: serde::Serialize` is not satisfied
 **Read the error.** It's not about ownership this time. It's about traits, but read it the same
 careful way:
 
-- *Where* is the problem? Line 54, inside the derive. The derive generated code that we can't see.
+- *Where* is the problem? Line 63, inside the derive. The derive generated code that we can't see.
 - *What* did that code call? `SerializeStruct::serialize_field`, once per field. Its signature
   requires `T: Serialize` for the value. So the generated code is roughly "for each field, call
   `serialize_field(name, &self.field)`", and that only works if every field type is `Serialize`.
@@ -208,7 +208,7 @@ Fix it by deriving on the field types:
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct CompanyId(pub u64);
 
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Lifecycle {
     Prospect,
@@ -273,7 +273,7 @@ Three things to notice:
 ## Step 3 — Derive across the whole domain
 
 Now do the same for everything that lives inside `Crm`. Add `Serialize, Deserialize` to the
-derive list of each of these (and `use serde::{Deserialize, Serialize};` at the top of each file):
+**end** of the existing derive list of each of these (keep every derive that's already there) (and `use serde::{Deserialize, Serialize};` at the top of each file):
 
 | File | Types |
 |---|---|
@@ -398,7 +398,7 @@ the invariant from Labs 12–13: *if you're holding an `Email`, it's valid.*
 
 ```rust
 // src/contacts/email.rs
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Email(String);
 ```
 
@@ -431,7 +431,7 @@ convert it with `TryFrom`; to serialize, convert into a `String`":
 > 🟢 **FOLLOW ALONG**
 
 ```rust
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(try_from = "String", into = "String")]
 pub struct Email(String);
 ```
@@ -440,27 +440,29 @@ pub struct Email(String);
 
 ```text
 error[E0277]: the trait bound `String: From<Email>` is not satisfied
- --> src/contacts/email.rs:8:35
-  |
-8 | #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-  |                                   ^^^^^^^^^ the trait `From<Email>` is not implemented for `String`
-  |
-  = note: required for `Email` to implement `Into<String>`
+  --> src/contacts/email.rs:29:45
+   |
+29 | #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+   |                                             ^^^^^^^^^ the trait `From<Email>` is not implemented for `String`
+   |
+   = note: required for `Email` to implement `Into<String>`
 
 error[E0277]: the trait bound `Email: TryFrom<String>` is not satisfied
-  --> src/contacts/email.rs:8:46
+  --> src/contacts/email.rs:29:56
    |
- 8 | #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-   |                                              ^^^^^^^^^^^ unsatisfied trait bound
+29 | #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+   |                                                        ^^^^^^^^^^^ unsatisfied trait bound
    |
 help: the trait `TryFrom<String>` is not implemented for `Email`
       but trait `TryFrom<&str>` is implemented for it
-  --> src/contacts/email.rs:29:1
+  --> src/contacts/email.rs:62:1
    |
-29 | impl TryFrom<&str> for Email {
+62 | impl TryFrom<&str> for Email {
    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
    = help: for that trait implementation, expected `&str`, found `String`
 ```
+
+(Both errors also list a few extra `note:` lines; the ones above are the ones to read.)
 
 The attribute is a promise that two conversions exist. Read the second error closely: you have
 `TryFrom<&str>` from Lab 15, but serde asked for `TryFrom<String>`. Why `String`? Because
@@ -496,7 +498,7 @@ impl From<Email> for String {
 Run the example again:
 
 ```text
-called `Result::unwrap()` on an `Err` value: Error("invalid email address 'NOT AN EMAIL'", line: 0, column: 0)
+called `Result::unwrap()` on an `Err` value: Error("'NOT AN EMAIL' is not a valid email address", line: 0, column: 0)
 ```
 
 Your validation message, inside serde_json's error. Loading now goes **through** the front door.
@@ -589,7 +591,7 @@ pub struct InMemoryRepo<T: Entity> {
 ```
 
 ```rust
-// src/crm.rs
+// src/crm.rs (`Debug` is new on `Crm` too; it works now that `InMemoryRepo` derives it)
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct Crm {
     pub companies: InMemoryRepo<Company>,
@@ -700,20 +702,20 @@ with `matches!` instead of `assert_eq!`. Now you'll see why that was more than a
 
 ```text
 error[E0369]: binary operation `==` cannot be applied to type `&std::io::Error`
-  --> src/errors.rs:38:8
+  --> src/errors.rs:64:8
    |
-28 | #[derive(Debug, PartialEq)]
+53 | #[derive(Debug, PartialEq)]
    |                 --------- in this derive macro expansion
 ...
-38 |     Io(std::io::Error),
+64 |     Io(std::io::Error),
    |        ^^^^^^^^^^^^^^
    |
 note: `std::io::Error` does not implement `PartialEq`
 
 error[E0369]: binary operation `==` cannot be applied to type `&serde_json::Error`
-  --> src/errors.rs:39:10
+  --> src/errors.rs:65:10
    |
-39 |     Json(serde_json::Error),
+65 |     Json(serde_json::Error),
    |          ^^^^^^^^^^^^^^^^^
    |
 note: `serde_json::Error` does not implement `PartialEq`
@@ -922,8 +924,10 @@ Open `src/cli/mod.rs`. The REPL should:
 2. print what it loaded,
 3. save after every command that **changes** data.
 
-> 🟢 **FOLLOW ALONG**: adapt your `run()`. Your loop will look a little different; keep its shape,
-> change the marked parts.
+> 🟢 **FOLLOW ALONG**: adapt your Lab 14 `run()`. The parts marked `NEW` are the changes; the
+> rest is the loop you already have. (The helper is called `count`, and so is the loop's
+> counter. That's fine: the counter is declared after the last call to the helper, and shadows
+> it from there on.)
 
 ```rust
 use std::path::Path;
@@ -938,16 +942,18 @@ fn count(n: usize, one: &str, many: &str) -> String {
 }
 
 pub fn run() {
-    println!("Rust CRM v{}", env!("CARGO_PKG_VERSION"));
+    println!("{APP_NAME} v{}", env!("CARGO_PKG_VERSION"));
     println!("Type 'help' for a list of commands.");
 
-    // NEW: load, or refuse to start
+    // NEW: load, or refuse to start (this replaces `let mut crm = Crm::new();`)
     let path = Path::new(DATA_FILE);
     let mut crm = match storage::load(path) {
         Ok(crm) => crm,
         Err(e) => {
             println!("Error: could not load {DATA_FILE}: {e}");
-            println!("Refusing to start, so the file is not overwritten. Fix or move it and try again.");
+            println!(
+                "Refusing to start, so the file is not overwritten. Fix or move it and try again."
+            );
             return;
         }
     };
@@ -958,37 +964,53 @@ pub fn run() {
         count(crm.deals.len(), "deal", "deals"),
         count(crm.leads.len(), "lead", "leads"),
     );
-    let mut commands_run = 0;
+    let mut count = 0;
 
-    while let Some(line) = read_line("crm> ") {
-        let command = match parser::parse_command(&line) {
-            Ok(Some(command)) => command,
-            Ok(None) => continue,
-            Err(e) => {
-                println!("Error: {e}");
-                continue;
-            }
-        };
-        commands_run += 1;
-        if command == Command::Quit {
-            break;
+    let commands_run = loop {
+        print!("crm> ");
+        io::stdout().flush().expect("failed to flush stdout");
+
+        let mut input = String::new();
+        let bytes = io::stdin()
+            .read_line(&mut input)
+            .expect("failed to read line");
+        if bytes == 0 {
+            println!();
+            break count;
         }
-        // NEW: remember whether to save, then execute
-        let mutating = command.is_mutating();
-        match commands::execute(&mut crm, command) {
-            Ok(()) if mutating => {
-                if let Err(e) = storage::save(&crm, path) {
+
+        let result = match parser::parse_command(&input) {
+            Ok(None) => continue,
+            Ok(Some(Command::Quit)) => break count,
+            Ok(Some(command)) => {
+                // NEW: ask before `execute` takes the command, save after it succeeds
+                let mutating = command.is_mutating();
+                let result = commands::execute(&mut crm, command);
+                if result.is_ok()
+                    && mutating
+                    && let Err(e) = storage::save(&crm, path)
+                {
                     println!("Error: could not save {DATA_FILE}: {e}");
                 }
+                result
             }
-            Ok(()) => {}
-            Err(e) => println!("Error: {e}"),
+            Err(e) => Err(e),
+        };
+        count += 1;
+
+        if let Err(e) = result {
+            println!("Error: {e}");
         }
-    }
+    };
 
     println!("Goodbye! ({commands_run} commands this session)");
 }
 ```
+
+`use crate::crm::Crm;` is no longer needed in `cli/mod.rs` (the compiler will tell you). The
+`if ... && let Err(e) = ...` is an edition 2024 **let chain**: "if the command succeeded, and it
+mutates, and saving fails, then report it". (`cargo clippy` suggests exactly this shape if you
+write it as two nested `if`s.)
 
 **Why refuse to start?** If the file is corrupt and we shrugged and started with an empty `Crm`,
 the very next `company add` would *save*, overwriting the user's (repairable) data with one
@@ -996,19 +1018,21 @@ company. Failing loudly is the kind option.
 
 **Why compute `mutating` before `execute`?**
 
-> 🟡 **EXPERIMENT**: inline it as `Ok(()) if command.is_mutating() => {` and run `cargo check`.
+> 🟡 **EXPERIMENT**: replace `mutating` in the `if` with `command.is_mutating()` and run
+> `cargo check`.
 
 ```text
 error[E0382]: borrow of moved value: `command`
-  --> src/cli/mod.rs:67:23
+  --> src/cli/mod.rs:68:24
    |
-54 |         let command = match parser::parse_command(&line) {
-   |             ------- move occurs because `command` has type `parser::Command<'_>`, which does not implement the `Copy` trait
+63 |             Ok(Some(command)) => {
+   |                     ------- move occurs because `command` has type `parser::Command<'_>`, which does not implement the `Copy` trait
 ...
-66 |         match commands::execute(&mut crm, command) {
-   |                                           ------- value moved here
-67 |             Ok(()) if command.is_mutating() => {
-   |                       ^^^^^^^ value borrowed here after move
+66 |                 let result = commands::execute(&mut crm, command);
+   |                                                          ------- value moved here
+67 |                 if result.is_ok()
+68 |                     && command.is_mutating()
+   |                        ^^^^^^^ value borrowed here after move
    |
 note: consider changing this parameter type in function `execute` to borrow instead if owning the value isn't necessary
 ```
@@ -1062,7 +1086,7 @@ Add a company and a contact, log a call, quit. Then run again and list.
 
 ## ✅ Expected Result
 
-First session (your table formatting may differ):
+First session:
 
 ```text
 Rust CRM v0.1.0
@@ -1070,21 +1094,22 @@ Type 'help' for a list of commands.
 Loaded 0 companies, 0 contacts, 0 deals, 0 leads from crm-data.json
 crm> company add
 Name: Acme Ltd
-Website (blank for none): https://acme.test
+Website (optional): https://acme.test
 Added company #1
 crm> contact add
 Name: Ada Lovelace
 Email: ada@acme.test
-Phone (blank for none): 555-0100
+Phone (optional): 555-0100
 Company id (blank for none): 1
 Added contact #1
 crm> activity log contact:1
 Kind (call/email/meeting): call
-Minutes: 15
+Duration in minutes: 15
 Summary: Intro call
+When (YYYY-MM-DD HH:MM, UTC; blank for now):
 Logged activity #1 on contact:1
 crm> quit
-Goodbye! (4 commands this session)
+Goodbye! (3 commands this session)
 ```
 
 `cat crm-data.json` (abridged):
@@ -1139,8 +1164,11 @@ Rust CRM v0.1.0
 Type 'help' for a list of commands.
 Loaded 1 company, 1 contact, 0 deals, 0 leads from crm-data.json
 crm> contact list
-#1 Ada Lovelace  ada@acme.test  555-0100
-crm>
+ID   NAME                 EMAIL                    PHONE          COMPANY
+#1   Ada Lovelace         ada@acme.test            555-0100       #1
+Page 1 of 1 (1 matching)
+crm> quit
+Goodbye! (1 commands this session)
 ```
 
 And `ls` shows no `crm-data.json.tmp` left behind.
@@ -1183,7 +1211,7 @@ report errors.
 ```text
 Rust CRM v0.1.0
 Type 'help' for a list of commands.
-Error: could not load crm-data.json: data file is not valid: invalid email address 'ada at acme' at line 18 column 31
+Error: could not load crm-data.json: data file is not valid: 'ada at acme' is not a valid email address at line 18 column 31
 Refusing to start, so the file is not overwritten. Fix or move it and try again.
 ```
 

@@ -254,7 +254,11 @@ pub async fn list(db: impl PgExecutor<'_>, scope: DealScope) -> Result<Vec<Deal>
   out. Postgres plans `OR`s like this reasonably at CRM scale. If `EXPLAIN ANALYZE` (Lab 32) shows a
   problem with 100k deals, switch to a `QueryBuilder` that only emits the needed branch.
 - `list` takes `DealScope`, not `Viewer`: the repository still doesn't know about roles. It
-  executes a scope that someone else decided.
+  executes a scope that someone else decided. `DealScope` replaces Lab 36's `DealFilter`, so
+  `deals::db::search` (secured in Lab 36 Your Turn 5) takes a `DealScope` too and gets the same
+  join and `WHERE`, and Lab 36's `http::deals::deal_scope(&AuthUser) -> DealFilter` helper is
+  replaced by `policy::deal_scope(&viewer)`. The repository test that calls
+  `deals::db::list(&pool, &DealFilter::default())` becomes `deals::db::list(&pool, DealScope::All)`.
 - **Team deletion → 409** via `is_foreign_key_violation()` on the `DELETE`, mirroring how
   Lab 31 maps unique violations. Duplicate names → `is_unique_violation()` → `DuplicateTeam`.
 - **`list_with_counts`** uses `LEFT JOIN users ... GROUP BY t.id` with `COUNT(u.id) AS "members!"`.
@@ -276,7 +280,7 @@ async fn load_deal_for(state: &AppState, viewer: &Viewer, id: DealId, action: Ac
     Ok(deal)
 }
 
-async fn reassign_deal(viewer: Viewer, State(state): State<AppState>, Path(id): Path<i64>,
+async fn reassign_deal(viewer: Viewer, State(state): State<AppState>, AppPath(id): AppPath<i64>,
                        AppJson(req): AppJson<ReassignDealRequest>) -> Result<Json<DealResponse>, ApiError> {
     // 1. the deal: 404 if invisible, 403 if visible but not reassignable
     let deal = load_deal_for(&state, &viewer, DealId(id), Action::ReassignDeal).await?;

@@ -20,7 +20,7 @@ into `contact add` isn't an option. Add an `import` command that reads contacts 
 ```text
 crm> import contacts.csv
 Imported 8, skipped 2
-  line 5: invalid email address 'bob(at)example.test'
+  line 5: 'bob(at)example.test' is not a valid email address
   line 9: a contact with email ada@analytical.test already exists
 ```
 
@@ -121,15 +121,16 @@ Expected, starting from an **empty** CRM (`cargo run -- --storage memory`):
 ```text
 crm> import contacts.csv
 Imported 8, skipped 2
-  line 5: invalid email address 'bob(at)example.test'
+  line 5: 'bob(at)example.test' is not a valid email address
   line 9: a contact with email ada@analytical.test already exists
 crm> company list
-#1 Analytical Engines             [prospect]
-#2 US Navy                        [prospect]
-#3 Apollo, MIT                    [prospect]
-#4 Linux Foundation               [prospect]
-#5 Bletchley Park                 [prospect]
-#6 CERN                           [prospect]
+ID   NAME                 STAGE     WEBSITE
+#1   Analytical Engines   prospect  -
+#2   US Navy              prospect  -
+#3   Apollo, MIT          prospect  -
+#4   Linux Foundation     prospect  -
+#5   Bletchley Park       prospect  -
+#6   CERN                 prospect  -
 ```
 
 (Your messages and table formatting come from your own `Display` impls and may differ. The

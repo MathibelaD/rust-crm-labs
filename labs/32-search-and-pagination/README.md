@@ -1104,14 +1104,14 @@ Ids, emails and timestamps depend on your seed run. The shapes:
 {"companies":[],"contacts":[],"deals":[{"id":1,"company_id":1,"title":"Compiler pilot","value_cents":2500000,"stage":"proposal"}]}
 
 HTTP/1.1 422 Unprocessable Entity
-{"error":{"code":"validation_failed","fields":[{"field":"q","message":"must be at least 2 characters"}],"message":"request validation failed"}}
+{"error":{"code":"validation_failed","message":"request has invalid fields","fields":[{"field":"q","message":"must be at least 2 characters"}]}}
 
 {"items":[{"id":2,"subject":"deal:30001","kind":{"type":"call","minutes":6},"summary":"Seeded call 1","occurred_at":"2026-10-05T14:43:12.885315Z"},{"id":3,"subject":"deal:30001","kind":{"type":"call","minutes":7},"summary":"Seeded call 2","occurred_at":"2026-10-05T14:42:12.885315Z"}],"next_cursor":"MjAyNi0xMC0wNVQxNDo0MjoxMi44ODUzMTVafDM"}
 
 {"items":[{"id":4,"subject":"deal:30001",...,"summary":"Seeded call 3",...},{"id":5,...,"summary":"Seeded call 4",...}],"next_cursor":"MjAyNi0xMC0wNVQxNDo0MDoxMi44ODUzMTVafDU"}
 
 HTTP/1.1 422 Unprocessable Entity
-{"error":{"code":"validation_failed","fields":[{"field":"cursor","message":"invalid cursor"}],"message":"request validation failed"}}
+{"error":{"code":"validation_failed","message":"request has invalid fields","fields":[{"field":"cursor","message":"invalid cursor"}]}}
 
 {"items":[{"id":1,"name":"US Navy","website":null,"lifecycle":"prospect","contact_count":1},{"id":3,"name":"Initech","website":null,"lifecycle":"prospect","contact_count":0}],"page":1,"per_page":2,"total":10002}
 

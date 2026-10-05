@@ -77,7 +77,7 @@ each: **who needs to react to it**, and **who needs to read it**?
 | Not found, duplicate email, has contacts, bad deal transition, lead not qualified | `Crm` methods, `Deal`, `Lead` | REPL (Lab 27: 404 / 409) | User |
 | Unknown command, wrong arguments | `cli/parser.rs` | REPL only | User |
 | Can't read / write / parse `crm-data.json` | `storage.rs` | REPL: refuse to start, or warn on save | User, or whoever runs the program |
-| Can't write to stdout | `read_line` | Nobody can (`expect`) | Nobody, the terminal is gone |
+| Can't write to stdout / read stdin | the REPL loop and `prompt` in `cli/mod.rs` | Nobody can (`expect`) | Nobody, the terminal is gone |
 
 Two kinds of consumer appear:
 
@@ -123,26 +123,34 @@ lives far away from the variant.
 ```rust
 use thiserror::Error;
 
+/// Why a piece of user input was rejected.
 #[derive(Debug, PartialEq, Error)]
 pub enum ValidationError {
-    #[error("name must not be empty")]
+    #[error("name cannot be empty")]
     EmptyName,
-    #[error("invalid email address '{0}'")]
+    #[error("'{0}' is not a valid email address")]
     InvalidEmail(String),
-    #[error("invalid phone number '{0}'")]
+    #[error("'{0}' is not a valid phone number")]
     InvalidPhone(String),
-    #[error("invalid amount '{0}'")]
+    #[error("invalid website: {0}")]
+    InvalidWebsite(String),
+    #[error("invalid lifecycle '{0}' (expected prospect, customer or churned)")]
+    InvalidLifecycle(String),
+    #[error("invalid amount: '{0}' (expected e.g. 1250 or 1250.50)")]
     InvalidMoney(String),
     #[error("invalid {field}: '{value}'")]
     InvalidValue { field: &'static str, value: String },
     #[error("title must not be empty")]
     EmptyTitle,
-    // ... InvalidWebsite, InvalidLifecycle, EmptyNote and any others you have ...
+    #[error("note must not be empty")]
+    EmptyNote,
 }
 ```
 
-Convert **every** variant you have, and keep **your** existing messages. The ones above are
-examples. Struct variants name their fields in the message (`{field}`, `{value}`).
+Convert **every** variant you have, and keep **your** existing messages: each `#[error("...")]`
+is exactly the text from the matching arm of the `Display` impl you just deleted. (If your enum has
+more variants or other wording, keep yours.) Struct variants name their fields in the message
+(`{field}`, `{value}`). `use std::fmt;` is no longer needed once both enums are converted.
 
 What does `#[derive(Error)]` generate? Almost exactly what you wrote by hand in Lab 12:
 
@@ -151,8 +159,8 @@ What does `#[derive(Error)]` generate? Almost exactly what you wrote by hand in 
 impl std::fmt::Display for ValidationError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            ValidationError::EmptyName => write!(f, "name must not be empty"),
-            ValidationError::InvalidEmail(_0) => write!(f, "invalid email address '{}'", _0),
+            ValidationError::EmptyName => write!(f, "name cannot be empty"),
+            ValidationError::InvalidEmail(_0) => write!(f, "'{}' is not a valid email address", _0),
             // ...
         }
     }
@@ -173,7 +181,7 @@ Two important properties:
 - `{0}` refers to the first tuple field and `{entity}` to a named field. Any expression works
   with the extra-argument syntax: `#[error("could not read {}", path.display())]`.
 
-Run `cargo test`. Nothing should change.
+Run `cargo test`. Nothing should change: your Lab 12–21 tests still see the same messages.
 
 ### `Error::source()`: errors have causes
 
@@ -211,25 +219,26 @@ other.
 > We'll move them out one at a time.
 
 ```rust
+/// Everything that can go wrong while running a CRM command.
 #[derive(Debug, Error)]
 pub enum CrmError {
-    #[error("{entity} #{id} not found")]
+    #[error("no {entity} with id {id}")]
     NotFound { entity: &'static str, id: u64 },
     #[error("a contact with email {0} already exists")]
     DuplicateEmail(String),
     #[error("validation failed")]
     Validation(#[from] ValidationError),
-    #[error("company {0} still has contacts")]
+    #[error("company {0} still has contacts; delete them first")]
     HasContacts(CompanyId),
-    #[error("a deal cannot move from {from} to {to}")]
+    #[error("cannot move a deal from {from} to {to}")]
     InvalidTransition { from: DealStage, to: DealStage },
-    #[error("lead {0} is not qualified")]
+    #[error("lead {0} must be qualified before it can be converted")]
     LeadNotQualified(LeadId),
-    #[error("lead {0} was disqualified and cannot be qualified")]
+    #[error("lead {0} has been disqualified")]
     LeadDisqualified(LeadId),
-    #[error("Unknown command: {0}. Type 'help' for a list of commands.")]
+    #[error("unknown command '{0}' (type 'help' for a list of commands)")]
     UnknownCommand(String),
-    #[error("Usage: {0}")]
+    #[error("usage: {0}")]
     Usage(&'static str),
     #[error("file error")]
     Io(#[from] std::io::Error),
@@ -250,8 +259,11 @@ Email: nope
 Error: validation failed
 ```
 
-The REPL prints `{e}`, which is only the **top** of the chain. "invalid email address 'nope'" is
-still there, one `source()` down, but nobody prints it. You have two honest options:
+`cargo test` notices too: Lab 12's `validation_errors_convert_into_crm_errors` fails, because it
+pins the message to `"name cannot be empty"`.
+
+The REPL prints `{e}`, which is only the **top** of the chain. "'nope' is not a valid email
+address" is still there, one `source()` down, but nobody prints it. You have two honest options:
 
 1. The wrapper **adds information** ("validation failed" while doing *what*?). Then keep it as a
    separate link, and make sure every printer shows the full chain.
@@ -266,7 +278,8 @@ still there, one `source()` down, but nobody prints it. You have two honest opti
     Validation(#[from] ValidationError),
 ```
 
-Run the experiment again: `Error: invalid email address 'nope'`.
+Run the experiment again: `Error: 'nope' is not a valid email address`, and `cargo test` is green
+again.
 
 ---
 
@@ -283,6 +296,10 @@ error[E0277]: the trait bound `CrmError: From<std::io::Error>` is not satisfied
    |
 help: the trait `From<std::io::Error>` is not implemented for `CrmError`
       but trait `From<ValidationError>` is implemented for it
+  --> src/errors.rs:40:18
+   |
+40 |     Validation(#[from] ValidationError),
+   |                  ^^^^
 
 error[E0277]: `?` couldn't convert the error to `CrmError`
   --> src/storage.rs:20:46
@@ -296,9 +313,11 @@ error[E0277]: `?` couldn't convert the error to `CrmError`
    |               this can't be annotated with `?` because it has type `Result<_, serde_json::Error>`
    |
 note: `CrmError` needs to implement `From<serde_json::Error>`
+...
+error: could not compile `rust-crm` (lib) due to 7 previous errors
 ```
 
-Good. The compiler just listed every place where a storage concern leaked into the domain type.
+(The other five are the same error for the `?`s in `save`.) Good. The compiler just listed every place where a storage concern leaked into the domain type.
 
 Notice also what the old design **lost**: an `io::Error` says "Permission denied" but **not which
 file**. `io::Error` doesn't store paths. If the CRM ever touches two files, "Permission denied"
@@ -361,7 +380,10 @@ pub fn load(path: &Path) -> Result<Crm, StorageError> {
         Ok(file) => file,
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Crm::default()),
         Err(source) => {
-            return Err(StorageError::Read { path: path.to_path_buf(), source });
+            return Err(StorageError::Read {
+                path: path.to_path_buf(),
+                source,
+            });
         }
     };
     let reader = BufReader::new(file);
@@ -401,7 +423,8 @@ Look closely at `write_atomically`:
 - `map_err(|source| StorageError::Parse { path: path.to_path_buf(), source })` uses field init
   shorthand: `source` means `source: source`.
 
-Fix your storage tests from Lab 21: `Err(CrmError::Json(_))` becomes
+Delete `use crate::errors::CrmError;` from `storage.rs`; nothing there needs it any more. Fix your
+storage tests from Lab 21: `Err(CrmError::Json(_))` (in `load_rejects_an_invalid_email`) becomes
 `Err(StorageError::Parse { .. })`. `{ .. }` matches a struct variant regardless of its fields.
 
 `cargo check` passes again, because the REPL only prints `{e}`. Corrupt your data file (Lab 21,
@@ -440,9 +463,9 @@ use crate::errors::CrmError;
 /// Errors that only exist because there is a terminal UI.
 #[derive(Debug, Error)]
 pub(crate) enum CliError {
-    #[error("Unknown command: {0}. Type 'help' for a list of commands.")]
+    #[error("unknown command '{0}' (type 'help' for a list of commands)")]
     UnknownCommand(String),
-    #[error("Usage: {0}")]
+    #[error("usage: {0}")]
     Usage(&'static str),
     #[error(transparent)]
     Domain(#[from] CrmError),
@@ -457,33 +480,45 @@ pub(crate) enum CliError {
 Now move the two variants. Delete `UnknownCommand` and `Usage` from `CrmError`. Then:
 
 - in `cli/parser.rs`, `parse_command` (and its helpers) return `Result<_, CliError>` and build
-  `CliError::Usage` / `CliError::UnknownCommand`;
-- in `cli/commands.rs`, `execute` (and its helpers) return `Result<(), CliError>`.
+  `CliError::Usage` / `CliError::UnknownCommand`. Swap `use crate::errors::CrmError;` for
+  `use super::error::CliError;` (the parser itself no longer names `CrmError`);
+- in `cli/commands.rs`, `execute` and the handlers it calls (`company`, `contact`, `deal`, `lead`,
+  `log_activity`, `update_contact`) return `Result<(), CliError>`. Add
+  `use super::error::CliError;`. Leave `parse_datetime` and `parse_contact_ids` returning
+  `CrmError`: they only report domain validation errors, and `?` lifts those into `CliError`.
 
-Run `cargo check`. Three new kinds of error appear. Each one teaches something.
+Run `cargo check`. Two new kinds of error appear. Each one teaches something.
 
 **1. `?` performs exactly one conversion.**
 
 ```text
 error[E0277]: `?` couldn't convert the error to `CliError`
-   --> src/cli/commands.rs:166:57
+   --> src/cli/commands.rs:118:57
     |
-162 | fn contact(crm: &mut Crm, command: ContactCommand) -> Result<(), CliError> {
+114 | fn contact(crm: &mut Crm, command: ContactCommand) -> Result<(), CliError> {
     |                                                       -------------------- expected `CliError` because of this
 ...
-166 |             let email = Email::parse(&prompt("Email: "))?;
+118 |             let email = Email::parse(&prompt("Email: "))?;
     |                         --------------------------------^ the trait `From<ValidationError>` is not implemented for `CliError`
     |                         |
     |                         this can't be annotated with `?` because it has type `Result<_, ValidationError>`
     |
 note: `CliError` needs to implement `From<ValidationError>`
-    = note: the question mark operation (`?`) implicitly performs a conversion on the error value using the `From` trait
+   --> src/cli/error.rs:7:1
+    |
+  7 | pub(crate) enum CliError {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^
 ```
+
+The same error appears for every `?` on a `ValidationError` in the CLI: `Money::parse`, the
+`subject.parse()?` and `stage.parse()?` calls in the parser, and so on (plus one `.into()` in
+`log_activity`).
 
 `ValidationError → CrmError` exists, and `CrmError → CliError` exists. But `?` calls
 `From::from` **once**. It never searches for a path through several conversions. (If it did, adding
 one `From` impl anywhere could silently change which path is taken somewhere else.) You make the
-two-step journey explicit, once, in `src/cli/error.rs`:
+two-step journey explicit, once, in `src/cli/error.rs` (and change its import to
+`use crate::errors::{CrmError, ValidationError};`):
 
 ```rust
 /// `?` performs exactly one `From` conversion, so ValidationError -> CliError
@@ -495,52 +530,49 @@ impl From<ValidationError> for CliError {
 }
 ```
 
-**2. Returning a domain error by hand.**
-
-```text
-error[E0308]: mismatched types
-   --> src/cli/commands.rs:217:28
-    |
-217 |                 return Err(CrmError::DuplicateEmail(e.to_string()));
-    |                        --- ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ expected `CliError`, found `CrmError`
-```
-
-`?` converts for you, but `return Err(...)` doesn't. Add `.into()`:
-`return Err(CrmError::DuplicateEmail(e.to_string()).into());`
-
-**3. The domain was using CLI errors.**
+**2. The CLI was borrowing `CrmError` for its own messages.**
 
 ```text
 error[E0599]: no variant, associated function, or constant named `Usage` found for enum `CrmError` in the current scope
-  --> src/subject.rs:23:31
-   |
-23 |         let usage = CrmError::Usage("<company|contact|deal>:<id>");
-   |                               ^^^^^ variant, associated function, or constant not found in `CrmError`
+   --> src/cli/commands.rs:167:40
+    |
+167 |                 .map_err(|_| CrmError::Usage("company id must be a number"))?;
+    |                                        ^^^^^ variant, associated function, or constant not found in `CrmError`
+    |
+   ::: src/errors.rs:34:1
+    |
+ 34 | pub enum CrmError {
+    | ----------------- variant, associated function, or constant `Usage` not found for this enum
 ```
 
-This is the refactor paying off. Somewhere in Labs 19–20, domain code borrowed a CLI error because
-it was handy. (Your hits depend on how you wrote Labs 19–20. A typical one is `Subject`'s
-`FromStr` reporting a bad `deal:x` as `Usage`.) The compiler has just found every one of them.
+There are two of these, both in `cli/commands.rs`: `deal add` and `read_company_id` reject a
+company id that isn't a number. That's a typing mistake at a prompt, so it is a `CliError`:
+write `CliError::Usage(...)`, and make `read_company_id` return
+`Result<Option<CompanyId>, CliError>`.
 
-> 🔵 **YOUR TURN 1: evict CLI errors from the domain**
+**3. What's *not* in the list.** Look at the file names in the errors: every one is in
+`src/cli/`. No domain file used `Usage` or `UnknownCommand`. That's thanks to an earlier decision:
+Lab 20 made `Subject`'s `FromStr` return a `ValidationError::InvalidValue` instead of borrowing a
+CLI error. If any domain code *had* borrowed `Usage` because it was handy, this is where the
+compiler would have listed it (and `LeadDisqualified` from Lab 19 shows the fix: give the business
+rule its own domain variant).
+
+`cargo check` now passes. `cargo test` doesn't compile yet: the unit tests in `cli/parser.rs` and
+`cli/commands.rs` still match on `CrmError::Usage` and friends.
+
+> 🔵 **YOUR TURN 1: keep CLI errors out of the domain, and prove it**
 >
-> Fix every `E0599` outside `src/cli/` by giving the domain its **own** error for that situation.
-> Don't move `Usage` back.
->
-> - [ ] `Subject`'s `FromStr` uses `type Err = ValidationError;` and a new variant
->   `ValidationError::InvalidSubject(String)` holding the rejected input, with a message such as
->   `invalid subject 'deal:x' (expected company:<id>, contact:<id> or deal:<id>)`
->   (If you prefer, reuse your generic `ValidationError::InvalidValue { field: "subject", value }`
->   instead of a new variant. Either is fine; pick one and say why in a comment.)
-> - [ ] any other domain code that used `Usage` or `UnknownCommand` gets a fitting **domain**
->   variant. (Notice that `LeadDisqualified` already exists: Lab 19 gave that business rule its own
->   variant. That's the pattern to follow.)
-> - [ ] the CLI still prints a helpful usage line when the user types `history deal:x`
->   (the parser can `map_err` the domain error into `CliError::Usage`)
+> - [ ] fix the CLI's unit tests: in `cli/parser.rs`, `Err(CrmError::Usage(_))` becomes
+>   `Err(CliError::Usage(_))` (same for `UnknownCommand`), and a domain error is now one level
+>   down: `Err(CliError::Domain(CrmError::Validation(_)))`. The same goes for
+>   `Err(CrmError::NotFound { id: 42, .. })` in `cli/commands.rs`
 > - [ ] `grep -rnE "Usage|UnknownCommand" src | grep -v "src/cli/"` prints **nothing**
-> - [ ] a unit test: `"deal:x".parse::<Subject>()` returns
->   `Err(ValidationError::InvalidSubject("deal:x".to_string()))`. (`assert_eq!` works here.
->   Why does it work for `ValidationError` but not for `CrmError`?)
+> - [ ] the CLI still prints a helpful message when the user types `history deal:x` (it does: the
+>   domain's own message, through `CliError::Domain`. Try it)
+> - [ ] a unit test in `src/subject.rs`, `malformed_subject_is_a_validation_error`:
+>   `"deal:x".parse::<Subject>()` returns exactly your `ValidationError` (with Lab 20's code:
+>   `InvalidValue { field: "subject (expected e.g. company:3, contact:5 or deal:2)", value: "deal:x" }`).
+>   Use `assert_eq!`. (Why does it work for `ValidationError` but not for `CrmError`?)
 > - [ ] `cargo test` passes
 
 **Why bother?** Lab 28 maps `CrmError` and `ValidationError` onto HTTP status codes with a
@@ -571,8 +603,9 @@ For now, read it as "any error".)
 // src/cli/mod.rs
 pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     // ...
-    let mut crm = storage::load(path)?;   // replaces the whole `match storage::load(path) { … }`
-    // ...
+    let path = Path::new(DATA_FILE);
+    let mut crm = storage::load(path)?; // replaces the whole `match storage::load(path) { … }`
+    // ... "Loaded …" line and the loop, unchanged ...
     println!("Goodbye! ({commands_run} commands this session)");
     Ok(())
 }
@@ -594,7 +627,7 @@ data file again and run:
 ```text
 Rust CRM v0.1.0
 Type 'help' for a list of commands.
-Error: Parse { path: "crm-data.json", source: Error("invalid email address 'ada at acme'", line: 18, column: 31) }
+Error: Parse { path: "crm-data.json", source: Error("'ada at acme' is not a valid email address", line: 18, column: 31) }
 ```
 
 ```bash
@@ -642,12 +675,12 @@ fn main() -> anyhow::Result<()> {
 use anyhow::Context;
 
 pub fn run() -> anyhow::Result<()> {
-    println!("Rust CRM v{}", env!("CARGO_PKG_VERSION"));
+    println!("{APP_NAME} v{}", env!("CARGO_PKG_VERSION"));
     println!("Type 'help' for a list of commands.");
 
     let path = Path::new(DATA_FILE);
-    let mut crm = storage::load(path)
-        .context("refusing to start, so the data file is not overwritten")?;
+    let mut crm =
+        storage::load(path).context("refusing to start, so the data file is not overwritten")?;
     // ... "Loaded …" line and the loop, see below ...
     println!("Goodbye! ({commands_run} commands this session)");
     Ok(())
@@ -663,7 +696,7 @@ Error: refusing to start, so the data file is not overwritten
 
 Caused by:
     0: crm-data.json does not contain valid CRM data
-    1: invalid email address 'ada at acme' at line 18 column 31
+    1: 'ada at acme' is not a valid email address at line 18 column 31
 ```
 
 Exit code `1`. Every layer said one thing, in order: the **application** (what it decided), the
@@ -737,31 +770,39 @@ The standard library gives you `source()`. Walking it is a loop you'll write onc
 >     `StorageError::Write { path: "data.json".into(), source: std::io::Error::other("disk full") }`
 >     gives exactly `"could not write data.json: disk full"`
 >   - `transparent_validation_error_is_not_repeated`: `CrmError::from(ValidationError::EmptyName)`
->     gives exactly `"name must not be empty"` (this proves `transparent` forwards `source()` too)
+>     gives exactly `"name cannot be empty"` (this proves `transparent` forwards `source()` too)
+>
+>   `errors.rs` already has a `mod tests` from Lab 12: add the three tests there.
 > - [ ] no `unwrap`, no recursion needed (a `while let` loop is enough)
 
-Then use it in the REPL loop, for **both** kinds of non-fatal error:
+Then use it in the REPL loop, for **both** kinds of non-fatal error. Add
+`use crate::errors::error_chain;` to `src/cli/mod.rs`; only two `println!`s change (plus one
+new line):
 
 ```rust
-        let command = match parser::parse_command(&line) {
-            Ok(Some(command)) => command,
+        let result = match parser::parse_command(&input) {
             Ok(None) => continue,
-            Err(e) => {
-                println!("Error: {}", error_chain(&e));
-                continue;
-            }
-        };
-        // ...
-        let mutating = command.is_mutating();
-        match commands::execute(&mut crm, command) {
-            Ok(()) if mutating => {
-                if let Err(e) = storage::save(&crm, path) {
-                    println!("Error: {}", error_chain(&e));
-                    println!("(The change is kept in memory and will be saved with your next change.)");
+            Ok(Some(Command::Quit)) => break count,
+            Ok(Some(command)) => {
+                let mutating = command.is_mutating();
+                let result = commands::execute(&mut crm, command);
+                if result.is_ok()
+                    && mutating
+                    && let Err(e) = storage::save(&crm, path)
+                {
+                    println!("Error: {}", error_chain(&e)); // CHANGED
+                    println!(
+                        "(The change is kept in memory and will be saved with your next change.)"
+                    ); // NEW
                 }
+                result
             }
-            Ok(()) => {}
-            Err(e) => println!("Error: {}", error_chain(&e)),
+            Err(e) => Err(e),
+        };
+        count += 1;
+
+        if let Err(e) = result {
+            println!("Error: {}", error_chain(&e)); // CHANGED
         }
 ```
 
@@ -773,13 +814,14 @@ Why does a failed save keep running instead of exiting? The change *is* applied 
 user might fix the permission problem and the next save succeeds. Exiting would lose more data,
 not less. (Lab 25 makes this more robust with a dirty flag and a background saver.)
 
-### The last error path: `expect` in `read_line`
+### The last error path: `expect` on the terminal
 
-`read_line` still contains `io::stdout().flush().expect("stdout should be writable")`. Is that OK
-in "professional" error handling? Yes. `expect` is for **"if this fails, the program has no
+The loop and `prompt` still contain `io::stdout().flush().expect("failed to flush stdout")` and
+`.read_line(&mut input).expect("failed to read line")`. Is that OK in "professional" error
+handling? Yes. `expect` is for **"if this fails, the program has no
 sensible way to continue and nobody to report to"**. If the terminal itself is gone, there is no
-one to print an error message to. Keep it, and keep the message explaining *why* it's expected to
-succeed.
+one to print an error message to. Keep it. (A message that says *why* it's expected to succeed,
+such as `"stdout should be writable"`, reads even better; that's a matter of taste.)
 
 ---
 
@@ -799,17 +841,17 @@ Rust CRM v0.1.0
 Type 'help' for a list of commands.
 Loaded 1 company, 1 contact, 0 deals, 0 leads from crm-data.json
 crm> dance
-Error: Unknown command: dance. Type 'help' for a list of commands.
+Error: unknown command 'dance' (type 'help' for a list of commands)
 crm> note add deal:9 hi
-Error: deal #9 not found
+Error: no deal with id 9
 crm> contact add
 Name: A
 Email: bad
-Error: invalid email address 'bad'
+Error: 'bad' is not a valid email address
 crm> history deal:x
-Error: Usage: history <subject>
+Error: invalid subject (expected e.g. company:3, contact:5 or deal:2): 'deal:x'
 crm> quit
-Goodbye! (3 commands this session)
+Goodbye! (4 commands this session)
 ```
 
 With the directory read-only (the temp file can't be created):
@@ -817,7 +859,7 @@ With the directory read-only (the temp file can't be created):
 ```text
 crm> company add
 Name: Globex
-Website (blank for none):
+Website (optional):
 Added company #2
 Error: could not write crm-data.json: Permission denied (os error 13)
 (The change is kept in memory and will be saved with your next change.)
@@ -871,7 +913,7 @@ That's why the `Debug` format of the error type matters at the edge, and why any
 
 ## 👩🏽‍💻 Your Turn
 
-> 🔵 **YOUR TURN 1** (evict CLI errors from the domain) is in Step 5.
+> 🔵 **YOUR TURN 1** (keep CLI errors out of the domain) is in Step 5.
 > 🔵 **YOUR TURN 2** (`error_chain`) is in Step 8.
 
 > 🔵 **YOUR TURN 3: test the storage errors.** Add to the tests in `src/storage.rs`:
@@ -882,15 +924,15 @@ That's why the `Debug` format of the error type matters at the edge, and why any
 >   - `source()` is `Some`, and that source **downcasts** to a `serde_json::Error`
 >   - that `serde_json::Error` reports the right line (`.line()`)
 > - [ ] `error_chain_joins_every_cause`: for the same kind of file, `error_chain(&err)` starts with
->   `"<path> does not contain valid CRM data: "` and contains `"invalid email address 'nope'"`
+>   `"<path> does not contain valid CRM data: "` and contains `"'nope' is not a valid email address"`
 > - [ ] no `PartialEq` on `StorageError`
 > - [ ] `cargo test storage` passes
 
 ## 💡 Hint
 
-> 💡 **HINT** (Your Turn 1): `Subject::from_str` currently builds the same error in three
-> places. A small closure, `let invalid = || ValidationError::InvalidSubject(s.to_string());`,
-> lets you write `.ok_or_else(invalid)?` and `.map_err(|_| invalid())?`.
+> 💡 **HINT** (Your Turn 1): a `matches!` pattern can nest as deep as the value:
+> `matches!(parse_command("company list --stage won"), Err(CliError::Domain(CrmError::Validation(ValidationError::InvalidLifecycle(_)))))`.
+> The parser's test module needs `use crate::errors::{CrmError, ValidationError};` for that.
 
 > 💡 **HINT** (Your Turn 2): `err.source()` returns `Option<&(dyn Error + 'static)>`. Keep a
 > variable `current` of that type and loop with `while let Some(cause) = current { ...; current = cause.source(); }`.

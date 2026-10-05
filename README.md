@@ -34,6 +34,7 @@ rust-crm-labs/
 ├── roadmap/
 │   └── roadmap.md           ← the full curriculum plan
 ├── labs/
+│   ├── README.md            ← index of all labs
 │   ├── _TEMPLATE.md         ← the structure every lab follows
 │   └── NN-lab-name/
 │       ├── README.md        ← the lab itself
@@ -120,18 +121,10 @@ refactor changed.
 
 ---
 
-## What happens next
+## Lab index
 
-The **roadmap is written**. The labs are generated phase by phase, so each phase can be
-adjusted based on how the previous one went:
+All 41 labs, the five phase challenges and the capstone are listed in [labs/README.md](labs/README.md).
 
-- [x] Roadmap
-- [ ] Phase 0–1: Labs 01–05
-- [ ] Phase 2: Labs 06–10 + Challenge A
-- [ ] Phase 3: Labs 11–14
-- [ ] Phase 4–5: Labs 15–20 + Challenge B
-- [ ] Phase 6: Labs 21–24 + Challenge C
-- [ ] Phase 7–8: Labs 25–29 + Challenge D
-- [ ] Phase 9: Labs 30–33
-- [ ] Phase 10: Labs 34–36 + Challenge E
-- [ ] Phase 11 + Capstone: Labs 37–41
+Every lab's code was compiled and tested in a throwaway copy while the lab was written, so the
+compiler errors and outputs you see in the labs are real. Your output may differ in small details
+(paths, line numbers, thread ids, timings).

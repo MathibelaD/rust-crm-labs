@@ -22,8 +22,8 @@ impl Validate for Contact {
             let allowed = phone
                 .chars()
                 .all(|ch| ch.is_ascii_digit() || " +-()".contains(ch));
-            let has_digit = phone.chars().any(|ch| ch.is_ascii_digit());
-            if !allowed || !has_digit {
+            let digits = phone.chars().filter(|ch| ch.is_ascii_digit()).count();
+            if !allowed || digits < 7 {
                 return Err(ValidationError::InvalidPhone(phone.clone()));
             }
         }
@@ -38,35 +38,30 @@ borrow. `.clone()` only happens on the error path, where you need an owned `Stri
 error.
 
 **Why is `""` rejected?** An empty phone would pass the "all characters allowed" check (`all`
-on an empty iterator is `true`, since there's nothing to violate it), but fails "has a digit"
-(`any` on an empty iterator is `false`). The CLI turns blank input into `None` before it gets
+on an empty iterator is `true`, since there's nothing to violate it), but it has zero digits,
+which is fewer than 7. The CLI turns blank input into `None` before it gets
 here, so `Some("")` only shows up if some *other* code path builds a contact. That's exactly why
 the rule lives on the type.
 
 ### Wiring it in
 
-`src/contacts/store.rs`:
+`src/contacts/store.rs`: the store now refuses invalid contacts, so `add` returns a `Result`.
+It still knows nothing about other records (duplicates and companies are `Crm`'s job):
 
 ```rust
 use crate::entity::{Validate, find_by_id};
+use crate::errors::ValidationError;
 
+    /// Validates and stores a new contact. Duplicate emails and unknown companies
+    /// are checked by `Crm::add_contact`.
     pub fn add(
         &mut self,
         name: String,
         email: Email,
         phone: Option<String>,
         company_id: Option<CompanyId>,
-    ) -> Result<ContactId, CrmError> {
-        if self.email_exists(&email) {
-            return Err(CrmError::DuplicateEmail(email.as_str().to_string()));
-        }
-        let contact = Contact {
-            id: ContactId(self.next_id),
-            name,
-            email,
-            phone,
-            company_id,
-        };
+    ) -> Result<ContactId, ValidationError> {
+        let contact = Contact::new(ContactId(self.next_id), name, email, phone, company_id);
         contact.validate()?;
         self.next_id += 1;
         let id = contact.id;
@@ -75,10 +70,13 @@ use crate::entity::{Validate, find_by_id};
     }
 ```
 
-`contact.validate()?` returns `Result<(), ValidationError>` inside a function returning
-`Result<_, CrmError>`. The `?` converts using your `From<ValidationError> for CrmError`.
+The store's Lab 14 tests need the same treatment as `CompanyStore`'s: compare against
+`Ok(ContactId(1))` / `Ok(ContactId(2))` in `ids_start_at_one_and_increase`, and add `.unwrap()`
+after the `store.add(...)` calls in `search_is_case_insensitive` (an ignored `Result` is a
+`#[must_use]` warning).
 
-`src/crm.rs`: `add_contact` loses its name and phone checks and keeps only the company check:
+`src/crm.rs`: `add_contact` loses its `clean_name` / `clean_phone` calls and keeps the checks
+that need to see *other* records:
 
 ```rust
     pub fn add_contact(
@@ -88,19 +86,22 @@ use crate::entity::{Validate, find_by_id};
         phone: Option<String>,
         company_id: Option<CompanyId>,
     ) -> Result<ContactId, CrmError> {
-        if let Some(company_id) = company_id
-            && self.companies.find(company_id).is_none()
-        {
-            return Err(CrmError::NotFound {
-                entity: "company",
-                id: company_id.0,
-            });
+        if let Some(company_id) = company_id {
+            self.company(company_id)?;
         }
-        self.contacts.add(name, email, phone, company_id)
+        if self.contacts.email_exists(&email) {
+            return Err(CrmError::DuplicateEmail(email.as_str().to_string()));
+        }
+        let id = self.contacts.add(name, email, phone, company_id)?;
+        Ok(id)
     }
 ```
 
-`update_contact`: validate a **copy**, then commit.
+`self.contacts.add(...)?` returns `Result<_, ValidationError>` inside a function returning
+`Result<_, CrmError>`. The `?` converts using your `From<ValidationError> for CrmError`.
+
+`update_contact`: delete the `clean_name` / `clean_phone` lines at the top, keep the
+duplicate-email check, then validate a **copy** and commit:
 
 ```rust
         let contact = self.contacts.find_mut(id).ok_or(CrmError::NotFound {
@@ -133,21 +134,26 @@ database transaction, and you'll meet the real thing in Lab 31.
 (If you mutated `contact` directly and validated afterwards, a bad phone would leave a
 half-updated contact in the store. That's the bug the third acceptance criterion catches.)
 
+Now nothing calls `clean_name` or `clean_phone`: delete both functions. The `use` lines at the
+top of `crm.rs` become `use crate::contacts::{Contact, ContactId, ContactStore, Email};`,
+`use crate::entity::Validate;` (needed for `updated.validate()`) and
+`use crate::errors::CrmError;`. The Lab 14 test `blank_names_are_rejected` still mentions
+`ValidationError::EmptyName`, so add `use crate::errors::ValidationError;` inside the `tests`
+module. It passes unchanged: the rule moved, the behaviour didn't.
+
 ### Tests
 
-```rust
-#[cfg(test)]
-mod tests {
-    use super::*;
+Add these to the existing `tests` module in `src/contacts/model.rs`:
 
+```rust
     fn contact(name: &str, phone: Option<&str>) -> Contact {
-        Contact {
-            id: ContactId(1),
-            name: name.to_string(),
-            email: Email::parse("ada@example.com").unwrap(),
-            phone: phone.map(String::from),
-            company_id: None,
-        }
+        Contact::new(
+            ContactId(1),
+            name.to_string(),
+            Email::parse("ada@example.com").unwrap(),
+            phone.map(String::from),
+            None,
+        )
     }
 
     #[test]
@@ -163,18 +169,17 @@ mod tests {
 
     #[test]
     fn bad_phone_is_rejected() {
-        for bad in ["call me", "---", ""] {
+        for bad in ["call me", "12345", "---", ""] {
             assert_eq!(
                 contact("Ada", Some(bad)).validate(),
                 Err(ValidationError::InvalidPhone(bad.to_string()))
             );
         }
     }
-}
 ```
 
-`contact(...)` is a test helper that builds a `Contact` directly with a struct literal. That's
-allowed here because the test module is inside the crate and the fields are `pub`. Note that
+`contact(...)` is a test helper that builds a `Contact` with `Contact::new`, skipping the store
+(and therefore skipping validation), which is exactly what a test of `validate` needs. Note that
 `is_valid()` is available although `Contact`'s impl never wrote it (default method).
 
 ---
@@ -210,7 +215,8 @@ Line by line:
 - `write!` (not `f.pad`) for the whole row: we're composing several padded pieces, and the row
   itself is never put in a column.
 
-Test, matching the acceptance criteria exactly:
+Test, matching the acceptance criteria exactly. It replaces Lab 14's `summary_includes_all_fields`
+test; in `has_phone_is_false_without_phone`, delete the last line (the `summary()` assertion).
 
 ```rust
     #[test]
@@ -236,16 +242,19 @@ Then the commands (`src/cli/commands.rs`):
 const CONTACT_HEADER: &str =
     "ID   NAME                 EMAIL                    PHONE          COMPANY";
 
-        // contact list
-            let contacts = crm.contacts.page(page, PAGE_SIZE);
-            if contacts.is_empty() {
-                println!("No contacts on page {page}.");
+        // contact list: the table replaces the loop; the page footer stays
             } else {
                 print_table(CONTACT_HEADER, contacts);
+                let pages = crm.contacts.len().div_ceil(PAGE_SIZE);
+                println!("Page {page} of {pages}");
             }
 
-        // contact show
+        // contact show: the table replaces print_contact_line; the extra lines stay
+            let contact = crm.contact(id)?;
             print_table(CONTACT_HEADER, &[contact]);
+            if !contact.has_phone() {
+                println!("(no phone on file)");
+            }
 
         // contact search
             if results.is_empty() {
@@ -256,11 +265,17 @@ const CONTACT_HEADER: &str =
 
         // company show, after the company row and blank line
             if contacts.is_empty() {
-                println!("(no contacts)");
+                println!("No contacts yet.");
             } else {
                 print_table(CONTACT_HEADER, &contacts);
             }
+
+// update_contact
+    println!("Editing {}", crm.contact(id)?.label());
 ```
+
+Then delete `print_contact_line` (nothing calls it) and drop `Contact` from the
+`use crate::contacts::{...}` line; clippy tells you both.
 
 Notice that `print_table` accepted three different element types without changes:
 `&[Contact]` (from `page`), `&[&Contact]` (from `&[contact]`) and `&Vec<&Contact>` (auto-derefs
@@ -273,6 +288,7 @@ crm> contact list
 ID   NAME                 EMAIL                    PHONE          COMPANY
 #1   Ada Lovelace         ada@acme.io              555-0100       #1
 #2   Grace Hopper         grace@navy.mil           -              -
+Page 1 of 1
 crm> company show 1
 ID   NAME                 STAGE     WEBSITE
 #1   Acme Corp            prospect  acme.io
@@ -286,35 +302,35 @@ ID   NAME                 EMAIL                    PHONE          COMPANY
 ## Your Turn 3 — a generic `parse_id`
 
 ```rust
-/// Parses a numeric id into any id type that can be built from a `u64`.
-fn parse_id<Id: From<u64>>(arg: Option<&&str>, usage: &'static str) -> Result<Id, CrmError> {
-    arg.and_then(|s| s.parse::<u64>().ok())
+/// Ids are typed as plain numbers; the return type decides which id newtype to build.
+fn parse_id<Id: From<u64>>(raw: &str) -> Result<Id, CrmError> {
+    raw.parse::<u64>()
         .map(Id::from)
-        .ok_or(CrmError::Usage(usage))
+        .map_err(|_| CrmError::Usage("ids are positive whole numbers, e.g. 3"))
 }
 ```
 
 Call sites:
 
 ```rust
-        Some("show") => Ok(CompanyCommand::Show {
-            id: parse_id(args.get(1), "company show <id>")?,
-        }),
+        ("show", [id]) => CompanyCommand::Show {
+            id: parse_id(id)?,
+        },
 ```
 
 **How does the compiler know which `Id`?** Type inference flows *backwards* from where the
-value goes. The field `CompanyCommand::Show { id }` has type `CompanyId`, so `parse_id(...)?`
+value goes. The field `CompanyCommand::Show { id }` has type `CompanyId`, so `parse_id(id)?`
 must produce a `CompanyId`, so `Id = CompanyId`, and the bound `CompanyId: From<u64>` is checked
-and satisfied. In `company stage`, `let id = parse_id(args.get(1), usage)?;` has no annotation,
-but `id` is later used in `CompanyCommand::Stage { id, lifecycle }`, which is enough.
+and satisfied. The same happens in every arm: `ContactCommand::Delete { id }` makes it a
+`ContactId`.
 
 **`.map(Id::from)`** passes the associated function itself as the closure: `Id::from` *is* a
 function from `u64` to `Id`. Writing `.map(|n| Id::from(n))` is equivalent; clippy prefers the
 short form (`redundant_closure`).
 
-If the compiler can't infer `Id` anywhere (say, `let id = parse_id(args.get(1), "x")?;` and
-`id` is only printed), you'd get E0282 "type annotations needed", fixable with
-`parse_id::<CompanyId>(...)` (the turbofish) or `let id: CompanyId = ...`.
+If the compiler can't infer `Id` anywhere (say, `let id = parse_id(raw)?;` and `id` is only
+printed), you'd get E0282 "type annotations needed", fixable with `parse_id::<CompanyId>(raw)`
+(the turbofish) or `let id: CompanyId = ...`.
 
 ---
 
@@ -324,9 +340,9 @@ If the compiler can't infer `Id` anywhere (say, `let id = parse_id(args.get(1), 
 
 ```text
 error[E0277]: the trait bound `ContactId: Copy` is not satisfied
-  --> src/contacts/model.rs:33:15
+  --> src/contacts/model.rs:72:15
    |
-33 |     type Id = ContactId;
+72 |     type Id = ContactId;
    |               ^^^^^^^^^ the trait `Copy` is not implemented for `ContactId`
    |
 note: required by a bound in `Entity::Id`

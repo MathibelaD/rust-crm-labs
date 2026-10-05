@@ -52,6 +52,7 @@ src/http/mod.rs          protected router with route_layer
 src/main.rs              reads JWT_SECRET, fails fast
 migrations/<ts>_add_owners.sql   deals.owner_id, leads.owner_id, activities.created_by, notes.created_by
 tests/api/helpers.rs     app() with a test secret, register_and_login, login, with_token, send_authed
+tests/fixtures/users.sql a fixture owner; deals.sql and leads.sql gain owner_id
 ```
 
 > Written against **jsonwebtoken 11**, axum 0.8, sqlx 0.9, chrono 0.4.
@@ -209,8 +210,11 @@ pub enum AuthError {
 }
 ```
 
-Create empty `src/auth/extractor.rs` and `src/auth/middleware.rs` for now so this compiles
-(comment out the two `pub use` lines that point at them until Steps 8–9).
+Create empty `src/auth/jwt.rs`, `src/auth/extractor.rs` and `src/auth/middleware.rs` for now, and
+put `//` in front of the three `pub use` lines that point at them: `pub use jwt::…` comes back in
+Step 5, `pub use extractor::…` in Step 8, `pub use middleware::…` in Step 9. With that, `cargo check` passes. It will after **every** step
+of this lab: each step that refers to a Your Turn function gives you a `todo!()` stub to use until
+you write it. (Expect "never used" warnings for the new handlers until Step 9 routes them.)
 
 Two groups of variants:
 
@@ -291,6 +295,8 @@ pub fn verify(token: &str, keys: &JwtKeys) -> Result<Claims, AuthError> {
     }
 }
 ```
+
+Then remove the `//` from `pub use jwt::{Claims, JwtKeys};` in `src/auth/mod.rs`.
 
 The important lines:
 
@@ -408,7 +414,7 @@ it to be a pointer copy too, wrap it: `jwt: Arc<JwtKeys>`.
 > 🟢 **FOLLOW ALONG**: `src/main.rs`: where you build the state
 
 ```rust
-use anyhow::Context;
+// `anyhow::Context` is already imported. Add:
 use rust_crm::auth::JwtKeys;
 use secrecy::SecretString;
 
@@ -427,7 +433,7 @@ that message and a non-zero code. Try it: `JWT_SECRET=short cargo run`.
 
 Your tests construct `AppState` too. Update `helpers::app` now so the suite compiles:
 
-> 🟢 **FOLLOW ALONG**: `tests/api/helpers.rs`
+> 🟢 **FOLLOW ALONG**: `tests/api/helpers.rs` (it already imports `rust_crm::http::{AppState, router}` from Lab 33)
 
 ```rust
 use rust_crm::auth::JwtKeys;
@@ -437,7 +443,7 @@ const TEST_JWT_SECRET: &str = "test-only-secret-that-is-at-least-32-bytes";
 
 pub fn app(pool: PgPool) -> Router {
     let jwt = JwtKeys::new(&SecretString::from(TEST_JWT_SECRET)).unwrap();
-    http::router(AppState { pool, jwt })
+    router(AppState { pool, jwt })
 }
 ```
 
@@ -496,7 +502,7 @@ pub fn dummy_hash() -> String {
 > 🟢 **FOLLOW ALONG**: `src/http/auth.rs`: add the DTOs and the handler
 
 ```rust
-use crate::auth::{AuthError, AuthUser, jwt};
+use crate::auth::{AuthError, jwt};
 
 #[derive(Debug, Deserialize)]
 pub struct LoginRequest {
@@ -554,7 +560,16 @@ Walk through the types:
   doesn't, because "your email is malformed" vs "invalid credentials" is a small leak of its own.
 
 `password::verify_in_background(password: SecretString, hash: String) -> Result<bool, AuthError>`
-is **Your Turn 2**. It's the `verify_password` twin of Lab 34's `hash_in_background`.
+is **Your Turn 2**. It's the `verify_password` twin of Lab 34's `hash_in_background`. Until you
+write it, stub it in `src/auth/password.rs` so the project compiles:
+
+```rust
+pub async fn verify_in_background(_password: SecretString, _hash: String) -> Result<bool, AuthError> {
+    todo!("Your Turn 2")
+}
+```
+
+`login` isn't routed until Step 9, so nothing can reach the `todo!()` yet. Do Your Turn 2 before ▶️ Run It.
 
 ### The 401 response
 
@@ -717,11 +732,21 @@ Line by line:
 
 `bearer_token(&HeaderMap) -> Result<&str, AuthError>` is **Your Turn 1**. Note its lifetime:
 the returned `&str` borrows from the header map (elided lifetime, Lab 10), so no allocation is
-needed to get the token out.
+needed to get the token out. Until you write it, stub it at the bottom of `extractor.rs`:
+
+```rust
+pub fn bearer_token(_headers: &HeaderMap) -> Result<&str, AuthError> {
+    todo!("Your Turn 1")
+}
+```
+
+Now the type exists, so bring it into the crate's API: in `src/auth/mod.rs`, remove the `//` from
+`pub use extractor::{AuthUser, bearer_token};`.
 
 ### `GET /me`
 
-> 🟢 **FOLLOW ALONG**: `src/http/auth.rs`
+> 🟢 **FOLLOW ALONG**: `src/http/auth.rs`: add `AuthUser` to Step 7's import
+> (`use crate::auth::{AuthError, AuthUser, jwt};`), then the handler
 
 ```rust
 async fn me(user: AuthUser, State(state): State<AppState>) -> Result<Json<UserResponse>, ApiError> {
@@ -781,7 +806,7 @@ pub fn protected_routes() -> Router<AppState> {
 }
 ```
 
-(Import `routing::{get, post}`.)
+(Import `routing::{get, post}`. The Lab 34 `routes()` function is gone: `public_routes()` replaces it.)
 
 > 🟢 **FOLLOW ALONG**: `src/http/mod.rs`
 
@@ -793,7 +818,12 @@ pub fn router(state: AppState) -> Router {
         .merge(auth::protected_routes())
         .merge(companies::routes())
         .merge(contacts::routes())
-        // ... every other CRM module you merge or nest today ...
+        .merge(leads::routes())
+        .merge(deals::routes())
+        .merge(activities::routes())
+        .merge(notes::routes())
+        .merge(history::routes())
+        .merge(search::routes())
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
             crate::auth::require_auth,
@@ -807,7 +837,10 @@ pub fn router(state: AppState) -> Router {
 }
 ```
 
-Now remove the `//` from the two `pub use` lines in `src/auth/mod.rs`.
+`crate::auth::require_auth` only resolves once it's re-exported: in `src/auth/mod.rs`, remove the
+`//` from `pub use middleware::require_auth;` (the last commented line). Every route but
+`/health`, `/auth/register` and `/auth/login` now answers 401 without a token. Do Your Turn 1
+before you send requests with one.
 
 > 🟡 **EXPERIMENT**: predict first. Replace `from_fn_with_state(state.clone(), crate::auth::require_auth)`
 > with `from_fn(crate::auth::require_auth)` and `cargo check`.
@@ -919,7 +952,7 @@ sqlx migrate run
 ```
 
 ```text
-error: while executing migration 20260302000001: error returned from database: column "owner_id" of relation "deals" contains null values
+error: while executing migration 20261005143916: error returned from database: column "owner_id" of relation "deals" contains null values
 ```
 
 **Why?** `ADD COLUMN ... NOT NULL` without a `DEFAULT` gives every *existing* row a `NULL`
@@ -934,15 +967,24 @@ sqlx database reset -y      # drop, create, run every migration from scratch
 ```
 
 ```text
-Applied 20260101000001/migrate create companies (1.235042ms)
+Applied 20261005143132/migrate create companies (1.172334ms)
 ...
-Applied 20260302000001/migrate add owners (723.875µs)
+Applied 20261005143916/migrate add owners (1.001458ms)
 ```
 
-(Your migration names and count differ. All of them run.) Then re-register a user, and re-run
-`scripts/seed.sql` from Lab 32 if you use it. If the seed inserts deals, leads, activities
-or notes, it now needs an owner. Add a user at the top of the script and use
-`(SELECT id FROM users LIMIT 1)` in those inserts.
+(Your migration timestamps differ. All of them run.) Then re-register a user, and re-run
+`scripts/seed.sql` from Lab 32 if you use it. That seed inserts **deals** and **activities**,
+so it now needs an owner and an author. Right after `BEGIN;` add
+
+```sql
+-- Since Lab 35 every deal needs an owner and every activity an author.
+INSERT INTO users (email, name, password_hash)
+VALUES ('seed@example.test', 'Seed Owner', 'not-a-real-hash')
+ON CONFLICT (email) DO NOTHING;
+```
+
+then add `owner_id` to the deals `INSERT` column list and `created_by` to the activities one,
+with `(SELECT id FROM users WHERE email = 'seed@example.test')` as the extra `SELECT` value in each.
 
 **In production** you'd never reset. You'd do it in three migrations, with a deploy between them:
 
@@ -986,31 +1028,60 @@ pub struct NewDeal {
 ```
 
 `cargo check` now lists every place that builds a `Deal` or `NewDeal`, and that list *is* your
-to-do list. Typically:
+to-do list. With the Lab 31–33 code it is:
 
-- **`deals::db`**: the row struct gains `owner_id: i64`, every `SELECT`/`RETURNING` list gains
-  `owner_id`, the `INSERT` gains `$N`, and `TryFrom<DealRow>` sets `owner_id: UserId(row.owner_id)`:
+- **`NewDealInput::for_company`** (the only place a `NewDeal` is built) takes the owner too:
+
+```rust
+impl NewDealInput {
+    pub fn for_company(self, company_id: CompanyId, owner_id: UserId) -> NewDeal {
+        NewDeal {
+            company_id,
+            title: self.title,
+            value: self.value,
+            owner_id,
+        }
+    }
+}
+```
+
+- **`deals::db`**: `DealRow` gains `owner_id: i64`, every `SELECT`/`RETURNING` list gains
+  `owner_id` (in `insert`, `get`, `list`, `move_stage` and `search`), the `INSERT` gains `$4`,
+  and `TryFrom<DealRow>` sets `owner_id: UserId(row.owner_id)`. Keep Lab 31's foreign-key
+  mapping in `insert`:
 
 ```rust
 pub async fn insert(db: impl PgExecutor<'_>, new: &NewDeal) -> Result<Deal, CrmError> {
     let row = sqlx::query_as!(
         DealRow,
-        "INSERT INTO deals (company_id, title, value_cents, stage, owner_id)
-         VALUES ($1, $2, $3, 'qualification', $4)
+        "INSERT INTO deals (company_id, title, value_cents, owner_id)
+         VALUES ($1, $2, $3, $4)
          RETURNING id, company_id, title, value_cents, stage, owner_id",
         new.company_id.0,
-        &new.title,
+        new.title,
         new.value.cents(),
         new.owner_id.0,
     )
     .fetch_one(db)
-    .await?;
+    .await
+    .map_err(|e| match e {
+        sqlx::Error::Database(db) if db.is_foreign_key_violation() => CrmError::NotFound {
+            entity: "company",
+            id: new.company_id.0,
+        },
+        other => CrmError::Database(other),
+    })?;
     Ok(row.try_into()?)
 }
 ```
 
+  (`owner_id` always comes from a verified token or from an existing lead, so in practice
+  the foreign-key violation can only be the company's.)
+
+- **Two unit-test helpers** build a `Deal` literal: the `move_to_rejects_invalid_transition`
+  test in `deals/model.rs` and `deal()` in `deals/report.rs`. Give them `owner_id: UserId(1)`.
 - **`DealResponse`** gains `pub owner_id: i64`, so clients can see who owns a deal.
-- **The create handler** takes the user:
+- **The create handler** takes the user and passes it to `for_company`:
 
 ```rust
 async fn create_deal(
@@ -1018,26 +1089,25 @@ async fn create_deal(
     State(state): State<AppState>,
     AppJson(req): AppJson<CreateDealRequest>,
 ) -> Result<(StatusCode, Json<DealResponse>), ApiError> {
-    let new = NewDeal {
-        company_id: CompanyId(req.company_id),
-        title: req.title,
+    let input = NewDealInput {
+        title: req.title.trim().to_string(),
         value: Money::from_cents(req.value_cents),
-        owner_id: user.id,
     };
-    // ... insert, 201 as before
+    input.validate().map_err(CrmError::from)?;
+    let new = input.for_company(CompanyId(req.company_id), user.id);
+    let deal = deals::db::insert(&state.pool, &new).await?;
+    Ok((StatusCode::CREATED, Json(DealResponse::from(&deal))))
 }
 ```
 
-  (If you validate with `TryFrom<CreateDealRequest> for NewDeal`, it can't produce
-  `owner_id` from the request, and **it must not**: a client must never choose who owns what
-  they create. Build the `NewDeal` from the validated parts plus `user.id`, or make the
-  conversion take the owner: `NewDeal::from_request(req, user.id)`.)
+  `CreateDealRequest` does **not** get an `owner_id`: a client must never choose who owns
+  what they create. The owner comes from the token, as an argument, next to the validated input.
 
-- **`Lead::convert`** (Lab 19) builds a `Deal`, so it needs an owner too. The lead's owner should
-  own the deal it turns into. The smallest change is to add `pub owner: UserId` to
-  `ConversionIds` (the bundle of "values the new records need") and have
-  `leads::service::convert_lead` fill it from the `owner_id` of the lead row it locked with
-  `SELECT ... FOR UPDATE`. That's part of **Your Turn 3**.
+- **Lead conversion** (Lab 31's `leads::service::convert_lead`) also calls
+  `input.for_company(company.id)`, so it needs an owner too. The lead's owner should own the deal
+  it turns into. `Lead::plan_conversion` is pure (Lab 31): it decides *everything* a conversion
+  will create, so the owner belongs in its `ConversionPlan`, copied from the lead. That's part of
+  **Your Turn 3**.
 
 ### Notes
 
@@ -1045,9 +1115,9 @@ async fn create_deal(
 
 ```rust
 // src/notes/db.rs: one more parameter, one more column
-pub async fn insert(db: impl PgExecutor<'_>, /* your existing params */, created_by: UserId)
-    -> Result<Note, CrmError>
+pub async fn insert(pool: &PgPool, new: &NewNote, created_by: UserId) -> Result<Note, CrmError>
 // SQL: INSERT INTO notes (subject_type, subject_id, body, created_by) VALUES ($1, $2, $3, $4) ...
+//      (bind created_by.0 as the 4th value)
 
 // src/http/notes.rs
 async fn create_note(
@@ -1055,9 +1125,12 @@ async fn create_note(
     State(state): State<AppState>,
     AppJson(req): AppJson<CreateNoteRequest>,
 ) -> Result<(StatusCode, Json<NoteResponse>), ApiError> {
-    // ... validation as before ...
-    let note = notes::db::insert(&state.pool, /* ... */, user.id).await?;
-    // ...
+    let new = NewNote {
+        subject: parse_subject(&req.subject)?,
+        body: req.body,
+    };
+    let note = notes::db::insert(&state.pool, &new, user.id).await?;
+    Ok((StatusCode::CREATED, Json(NoteResponse::from(&note))))
 }
 ```
 
@@ -1076,8 +1149,9 @@ red. That's the middleware working. Give the tests a way to log in.
 > 🟢 **FOLLOW ALONG**: add to `tests/api/helpers.rs` (next to Lab 29's `send`, `get`, `post_json`, …)
 
 ```rust
-use axum::http::HeaderValue;
-use serde_json::json;
+// extend the existing imports:
+use axum::http::{HeaderValue, Request, StatusCode, header};
+use serde_json::{Value, json};
 
 pub const TEST_PASSWORD: &str = "correct horse battery staple";
 
@@ -1140,31 +1214,59 @@ let (status, body) =
 ```
 
 It's mechanical. A search-and-replace of `send(&app, ` → `send_authed(&app, &token, ` plus one
-`let token = ...` line per test does most of it. Helpers like Lab 29's `create_company(app, name)`
-need a token parameter too: `create_company(app, &token, name)`.
+`let token = ...` line per test does most of it. Tests written as `send(&app(pool), ...)` need
+the `let app = app(pool);` line first. Helpers that call protected routes need a token parameter
+too: Lab 29's `create_company(app, name)` becomes `create_company(app, &token, name)`, and
+`log_calls` in `tests/api/activities.rs` gains a `token: &str`. Leave `tests/api/auth.rs` alone:
+`/auth/register` is public.
 
-**Fixtures** (`tests/fixtures/*.sql`, Lab 33) that insert deals, leads, activities or notes need
-an owner now. Add a fixture that creates one, and look the id up by email (don't hard-code ids:
-identity columns, Lab 34):
+**Fixtures** (`tests/fixtures/*.sql`, Lab 33) that insert deals or leads need an owner now. Add a
+`users` fixture in the same style as the others (a known id via `OVERRIDING SYSTEM VALUE`, then
+`setval` so users registered *during* the test get ids after it):
 
 ```sql
 -- tests/fixtures/users.sql
-INSERT INTO users (email, name, password_hash, role)
-VALUES ('owner@example.com', 'Fixture Owner', 'not-a-real-hash', 'sales_rep');
+-- One user to own fixture deals and leads. The hash is never checked: nobody
+-- logs in as a fixture user.
+INSERT INTO users (id, email, name, password_hash, role) OVERRIDING SYSTEM VALUE VALUES
+    (1, 'owner@example.com', 'Fixture Owner', 'not-a-real-hash', 'sales_rep');
+
+SELECT setval(pg_get_serial_sequence('users', 'id'), (SELECT max(id) FROM users));
+```
+
+Then give every row in `deals.sql` and `leads.sql` an owner:
+
+```sql
+-- tests/fixtures/deals.sql
+-- Needs the "users" and "companies" fixtures first.
+INSERT INTO deals (id, company_id, title, value_cents, stage, owner_id) OVERRIDING SYSTEM VALUE VALUES
+    (1, 1, 'Rockets', 100000, 'qualification', 1),
+    (2, 1, 'Anvils', 25050, 'proposal', 1),
+    (3, 2, 'Widgets', 50000, 'won', 1);
+-- (setval line unchanged)
 ```
 
 ```sql
--- in tests/fixtures/deals.sql, for example
-INSERT INTO deals (company_id, title, value_cents, stage, owner_id)
-VALUES (1, 'Fixture deal', 100000, 'qualification',
-        (SELECT id FROM users WHERE email = 'owner@example.com'));
+-- tests/fixtures/leads.sql
+-- Needs the "users" fixture first.
+INSERT INTO leads (id, name, email, company_name, source, status, owner_id) OVERRIDING SYSTEM VALUE VALUES
+    (1, 'Dee Initech', 'dee@initech.test', 'Initech', 'referral', 'qualified', 1),
+    (2, 'Eve New', 'eve@new.test', NULL, 'website', 'new', 1);
+-- (setval line unchanged)
 ```
 
-…and list it first: `#[sqlx::test(fixtures("users", "companies", "deals"))]`. (`'not-a-real-hash'`
-is fine: nobody logs in as a fixture user, and the column is plain `TEXT`.)
+…and put `"users"` first in every test that loads `deals` or `leads`:
+`#[sqlx::test(fixtures(path = "../fixtures", scripts("users", "companies", "deals")))]`,
+`scripts("users", "leads")`, `scripts("users", "companies", "leads")`. (`'not-a-real-hash'` is fine:
+nobody logs in as a fixture user, and the column is plain `TEXT`.)
 
-**Repository tests** (`tests/db/`) that call `deals::db::insert` directly need a real
-`UserId`. A small helper does it:
+**Raw SQL in tests.** `tests/db/history.rs` (Lab 33) inserts a note and an activity with plain
+`INSERT`s. Both tables now have a `NOT NULL created_by`, so add the column with the fixture
+user's id: `INSERT INTO notes (subject_type, subject_id, body, created_at, created_by) VALUES (..., 1)`,
+and the same for `activities`.
+
+**Repository tests** (`tests/db/`) that call `deals::db::insert` (or `leads::db::insert`)
+directly need a real `UserId`. Use the fixture user (`UserId(1)`), or a small helper:
 
 ```rust
 async fn any_user(pool: &PgPool) -> UserId {
@@ -1281,13 +1383,12 @@ www-authenticate: Bearer
 
 ```json
 {"id":1,"email":"ada@example.com","name":"Ada Lovelace","role":"sales_rep","created_at":"2026-10-05T14:36:46.714144Z"}
-{"id":1,"name":"Acme","website":null}
+{"id":1,"name":"Acme","website":null,"lifecycle":"prospect"}
 {"id":1,"company_id":1,"title":"Annual licence","value_cents":1200000,"stage":"qualification","owner_id":1}
 {"status":"ok"}
 ```
 
-Your token, ids and timestamps will differ, and your company/deal JSON will have whatever
-fields your Lab 28–29 DTOs define. What must match: the **401s** with `www-authenticate: Bearer`, the
+Your token, ids and timestamps will differ. What must match: the **401s** with `www-authenticate: Bearer`, the
 **identical** bodies for wrong password vs unknown email, `expires_in: 900`, and `owner_id` on
 the deal being *your* user id.
 
@@ -1381,7 +1482,7 @@ limiting logins per IP/email (a Lab 41 stretch goal) is the other half of the de
 > One of them works. Which, and why? (Find `leeway` in Step 5.) Restore `ACCESS_TOKEN_TTL`.
 
 > 🟡 **EXPERIMENT 5: forget the extractor.** Remove `user: AuthUser` from `create_deal` and
-> put `owner_id: UserId(1)` in `NewDeal`. Call `POST /deals` without a token. Is it still
+> pass `UserId(1)` to `for_company` instead of `user.id`. Call `POST /deals` without a token. Is it still
 > protected? By which layer? Now imagine the route had been registered in `public_routes()` by
 > mistake. What would protect it then? Restore the extractor.
 
@@ -1417,12 +1518,18 @@ limiting logins per IP/email (a Lab 41 stretch goal) is the other half of the de
 
 > 🔵 **YOUR TURN 3: owners for leads and activities**
 >
-> - [ ] `POST /leads` stores `owner_id` = the caller. `LeadResponse` exposes `owner_id`.
-> - [ ] `POST /activities` stores `created_by` = the caller.
+> - [ ] `POST /leads` stores `owner_id` = the caller: `leads::db::insert(db, &new, owner_id: UserId)`.
+>       `Lead` gains `pub owner_id: UserId` and `LeadResponse` exposes `owner_id`.
+> - [ ] `POST /activities` stores `created_by` = the caller:
+>       `activities::db::insert(pool, &new, created_by: UserId)`. `Activity` gains
+>       `pub created_by: UserId` (Lab 39 reads it), so every `SELECT`/`RETURNING` on `activities` lists it.
 > - [ ] Converting a lead creates a deal **owned by the lead's owner** (not necessarily the
->       caller): `ConversionIds` gains `pub owner: UserId`, `Lead::convert` uses it for the
->       `Deal`, and `convert_lead` reads it from the locked lead row. Update the unit tests of
->       `Lead::convert` that build `ConversionIds`.
+>       caller): `ConversionPlan` gains `pub owner_id: UserId`, `Lead::plan_conversion` copies it
+>       from the lead, and `convert_lead` passes `plan.owner_id` to `for_company`. The lead row it
+>       locks with `get_for_update` already carries `owner_id` once `LeadRow` does. Update the
+>       `lead()` helper in the `leads/model.rs` unit tests (it builds a `Lead` literal).
+> - [ ] A repository test in `tests/db/leads.rs`: after `convert_lead`, the new deal's `owner_id`
+>       equals the lead's
 > - [ ] No request DTO has an `owner_id` / `created_by` field. Clients can't choose.
 > - [ ] `cargo sqlx prepare -- --all-targets` and the whole suite green
 
@@ -1471,12 +1578,13 @@ assert_eq!(response.headers()["www-authenticate"], "Bearer");
 
 </details>
 
-<details><summary>Hint 5 (Your Turn 3: ConversionIds)</summary>
+<details><summary>Hint 5 (Your Turn 3: the conversion's owner)</summary>
 
-`Lead::convert` is pure (Lab 19) and must stay pure: it doesn't look anything up. Whoever
-calls it supplies every id the new records need. The owner is one more such value, so it
-belongs next to the other ids. In `convert_lead`, the `SELECT ... FOR UPDATE` on the lead
-simply selects `owner_id` too.
+`Lead::plan_conversion` is pure (Lab 31) and must stay pure: it doesn't look anything up. It
+already decides the company, the contact and the deal input from the lead's own fields. The
+owner is one more of those facts (`self.owner_id`), so it belongs in the `ConversionPlan`. In
+`convert_lead`, `leads::db::get_for_update` returns a `Lead` built from `LeadRow`, so once the
+row's `SELECT ... FOR UPDATE` lists `owner_id`, the plan has everything `for_company` needs.
 
 </details>
 

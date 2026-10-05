@@ -10,12 +10,18 @@
 `execute` now dispatches every command to an async handler:
 
 ```rust
-        Command::Company(cmd) => company(state, input, cmd).await?,
-        Command::Contact(cmd) => contact(state, input, cmd).await?,
+        Command::Company(command) => company(state, input, command).await?,
+        Command::Contact(command) => contact(state, input, command).await?,
         Command::Deal(cmd) => deal(state, input, cmd).await?,
+        Command::Pipeline => read_crm(state, print_pipeline),
         Command::Lead(cmd) => lead(state, input, cmd).await?,
         Command::LogActivity { subject } => log_activity(state, input, subject).await?,
 ```
+
+Each handler below is your Lab 14–20 handler with the same prompts and the same printing. Only
+the plumbing changed: `prompt(…)` became `input.prompt(…).await?`, `prompt_optional(…)` became
+`optional(input.prompt(…).await?)`, and every use of the CRM moved into one `read_crm` or
+`write_crm` call **after** the last prompt.
 
 ### Contacts
 
@@ -23,79 +29,50 @@
 async fn contact(
     state: &Mutex<AppData>,
     input: &mut Input,
-    cmd: ContactCommand<'_>,
+    command: ContactCommand<'_>,
 ) -> anyhow::Result<()> {
-    match cmd {
+    match command {
         ContactCommand::Add => {
             let name = input.prompt("Name: ").await?;
             let email = Email::parse(&input.prompt("Email: ").await?)?;
-            let phone = optional(input.prompt("Phone (blank for none): ").await?);
-            let company_id = match input.prompt("Company id (blank for none): ").await?.as_str() {
-                "" => None,
-                s => Some(CompanyId(
-                    s.parse()
-                        .map_err(|_| CrmError::Usage("company id must be a number"))?,
-                )),
-            };
+            let phone = optional(input.prompt("Phone (optional): ").await?);
+            let company_id = read_company_id(input).await?;
             let id = write_crm(state, |crm| crm.add_contact(name, email, phone, company_id))?;
             println!("Added contact {id}");
         }
-        ContactCommand::List { page } => read_crm(state, |crm| {
-            let all = crm.list_contacts(&ContactFilter::default());
-            if all.is_empty() {
-                println!("No contacts yet.");
-            }
-            for c in all.iter().skip((page.max(1) - 1) * PAGE_SIZE).take(PAGE_SIZE) {
-                println!("{c}");
+        ContactCommand::List { filter, page } => read_crm(state, |crm| {
+            let contacts = crm.list_contacts(&filter);
+            let pages = contacts.len().div_ceil(PAGE_SIZE).max(1);
+            match contacts.chunks(PAGE_SIZE).nth(page - 1) {
+                Some(rows) => {
+                    print_table(CONTACT_HEADER, rows);
+                    println!("Page {page} of {pages} ({} matching)", contacts.len());
+                }
+                None if contacts.is_empty() => println!("No contacts match."),
+                None => println!("No page {page}: there are only {pages}."),
             }
         }),
         ContactCommand::Show { id } => read_crm(state, |crm| {
-            let c = crm
-                .contacts
-                .get(id)
-                .ok_or(CrmError::NotFound { entity: "contact", id: id.0 })?;
-            println!("{c}");
-            print_history(crm, Subject::Contact(id), 5);
+            let contact = crm.contact(id)?;
+            print_table(CONTACT_HEADER, &[contact]);
+            if !contact.has_phone() {
+                println!("(no phone on file)");
+            }
+            println!("  Domain:   {}", contact.email.domain());
+            println!("  Initials: {}", initials(&contact.name));
             Ok::<(), CrmError>(())
         })?,
-        ContactCommand::Update { id } => {
-            // Fail fast, before asking three questions about a contact that doesn't exist.
-            read_crm(state, |crm| {
-                crm.contacts
-                    .get(id)
-                    .map(|_| ())
-                    .ok_or(CrmError::NotFound { entity: "contact", id: id.0 })
-            })?;
-            let name = input.prompt("New name (blank to keep): ").await?;
-            let email = input.prompt("New email (blank to keep): ").await?;
-            let phone = input.prompt("New phone (blank to keep): ").await?;
-            let email = if email.is_empty() { None } else { Some(Email::parse(&email)?) };
-            write_crm(state, |crm| {
-                // Look it up again: it may have been deleted while we were prompting.
-                let contact = crm
-                    .contacts
-                    .get_mut(id)
-                    .ok_or(CrmError::NotFound { entity: "contact", id: id.0 })?;
-                if !name.is_empty() {
-                    contact.name = name;
-                }
-                if let Some(e) = email {
-                    contact.email = e;
-                }
-                if !phone.is_empty() {
-                    contact.phone = Some(phone);
-                }
-                Ok::<(), CrmError>(())
-            })?;
-            println!("Updated contact {id}");
-        }
+        ContactCommand::Update { id } => update_contact(state, input, id).await?,
         ContactCommand::Delete { id } => {
-            let removed = write_crm(state, |crm| crm.remove_contact(id))?;
-            println!("Deleted contact {id} ({})", removed.name);
+            let contact = write_crm(state, |crm| crm.remove_contact(id))?;
+            print_deleted("contact", &contact);
         }
         ContactCommand::Search { term } => read_crm(state, |crm| {
-            for c in crm.contacts.search(term) {
-                println!("{c}");
+            let results = crm.contacts.search(term);
+            if results.is_empty() {
+                println!("No contacts match '{term}'.");
+            } else {
+                print_table(CONTACT_HEADER, &results);
             }
         }),
     }
@@ -103,18 +80,62 @@ async fn contact(
 }
 ```
 
+```rust
+async fn update_contact(
+    state: &Mutex<AppData>,
+    input: &mut Input,
+    id: ContactId,
+) -> anyhow::Result<()> {
+    // Fail fast, before asking about a contact that doesn't exist.
+    let label = read_crm(state, |crm| crm.contact(id).map(|c| c.label()))?;
+    println!("Editing {label}");
+
+    let name = optional(input.prompt("Name (blank to keep): ").await?);
+    let answer = input.prompt("Email (blank to keep): ").await?;
+    let email = if answer.is_empty() {
+        None
+    } else {
+        Some(Email::parse(&answer)?)
+    };
+    let phone = optional(input.prompt("Phone (blank to keep): ").await?);
+
+    // `update_contact` looks the contact up again and checks for a duplicate email,
+    // all under this one lock: the contact may have changed while we were prompting.
+    write_crm(state, |crm| crm.update_contact(id, name, email, phone))?;
+    println!("Updated contact {id}");
+    Ok(())
+}
+
+/// Blank means "no company"; anything else must be a number.
+async fn read_company_id(input: &mut Input) -> anyhow::Result<Option<CompanyId>> {
+    let answer = input.prompt("Company id (blank for none): ").await?;
+    if answer.is_empty() {
+        return Ok(None);
+    }
+    let id: u64 = answer
+        .parse()
+        .map_err(|_| CliError::Usage("company id must be a number (or blank for none)"))?;
+    Ok(Some(CompanyId::from(id)))
+}
+```
+
 **Why validate the email *before* `write_crm`?** `Email::parse` doesn't need the CRM, so it
 belongs outside the lock. As a bonus, an invalid email fails before the lock is taken and before
 `dirty` is set.
 
-**Why two critical sections in `update`?** In Lab 24 your update probably called `find_mut`
-once and then prompted while holding the `&mut Contact`. That was fine with one owner and no
-other threads. Now the prompts must happen *outside* the lock, so there's a gap between the
-existence check and the write. In this CLI the only other party is the autosave task, which
-never deletes anything. But Lab 27 adds HTTP handlers that can `DELETE` a contact during that
-gap. The second lookup inside `write_crm` turns a potential `unwrap()` panic into a clean
-`NotFound`. This is the classic **check-then-act** race, and the cure is always to re-check
-under the lock that you act under.
+**Why two critical sections in `update`?** The prompts must happen *outside* the lock, and we
+also want to fail fast (your Lab 14 version printed `Editing …` before asking anything), so there's
+a gap between the existence check and the write. In this CLI the only other party is the
+autosave task, which never deletes anything. But Lab 27 adds HTTP handlers that can `DELETE` a
+contact during that gap. `Crm::update_contact` looks the contact up **again** (returning
+`NotFound` if it's gone) and checks the new email for duplicates, all inside the one
+`write_crm`, under the lock that the update happens under. Checked in a separate `read_crm`,
+another party could add a contact with that email in the gap. This is the classic
+**check-then-act** race, and the cure is always to re-check under the lock that you act under.
+Lab 14 put that logic in `Crm`, so the CLI only has to call it in the right place.
+
+**`read_company_id` stays a helper**, now `async` because it prompts. Its error is still a
+`CliError::Usage`: `?` turns it into an `anyhow::Error`.
 
 ### Deals
 
@@ -126,25 +147,30 @@ async fn deal(state: &Mutex<AppData>, input: &mut Input, cmd: DealCommand) -> an
                 .prompt("Company id: ")
                 .await?
                 .parse()
-                .map(CompanyId)
-                .map_err(|_| CrmError::Usage("company id must be a number"))?;
+                .map_err(|_| CliError::Usage("company id must be a number"))?;
             let title = input.prompt("Title: ").await?;
-            let value = Money::parse(&input.prompt("Value: ").await?)?;
-            let id = write_crm(state, |crm| crm.add_deal(company_id, title, value))?;
+            let value = Money::parse(&input.prompt("Value (e.g. 1250.50): ").await?)?;
+            let id = write_crm(state, |crm| {
+                crm.add_deal(CompanyId(company_id), title, value)
+            })?;
             println!("Added deal {id}");
         }
         DealCommand::List => read_crm(state, |crm| {
-            for d in crm.deals.iter() {
-                println!("{d}");
+            if crm.deals.is_empty() {
+                println!("No deals yet.");
+            }
+            for deal in crm.deals.iter() {
+                println!("{deal}");
             }
         }),
         DealCommand::Show { id } => read_crm(state, |crm| {
-            let d = crm
-                .deals
-                .get(id)
-                .ok_or(CrmError::NotFound { entity: "deal", id: id.0 })?;
-            println!("{d}");
-            print_history(crm, Subject::Deal(id), 5);
+            let deal = crm.deal(id)?;
+            let company = crm.company(deal.company_id)?;
+            println!("Deal {}: {}", deal.id, deal.title);
+            println!("  Company: {} {}", company.id, company.name);
+            println!("  Value:   {}", deal.value);
+            println!("  Stage:   {}", deal.stage);
+            print_recent_history(crm, Subject::Deal(id));
             Ok::<(), CrmError>(())
         })?,
         DealCommand::Move { id, stage } => {
@@ -165,45 +191,61 @@ async fn lead(state: &Mutex<AppData>, input: &mut Input, cmd: LeadCommand) -> an
             let name = input.prompt("Name: ").await?;
             let email = Email::parse(&input.prompt("Email: ").await?)?;
             let company_name = optional(input.prompt("Company name (blank for none): ").await?);
-            let source = input
-                .prompt("Source (website/referral/event/cold_outreach/other): ")
-                .await?
-                .parse()
-                .map_err(|_| CrmError::Usage("unknown lead source"))?;
-            let id = write_crm(state, |crm| crm.add_lead(name, email, company_name, source))?;
+            let source = match optional(
+                input
+                    .prompt(
+                        "Source (website/referral/event/cold_outreach/other, blank for other): ",
+                    )
+                    .await?,
+            ) {
+                Some(raw) => raw.parse()?,
+                None => LeadSource::Other,
+            };
+            let notes = optional(input.prompt("Notes (blank for none): ").await?);
+            let id = write_crm(state, |crm| {
+                crm.add_lead(name, email, company_name, source, notes)
+            })?;
             println!("Added lead {id}");
         }
-        LeadCommand::List => read_crm(state, |crm| {
-            for l in crm.leads.iter() {
-                println!("{l}");
+        LeadCommand::List(filter) => read_crm(state, |crm| {
+            let leads = crm.list_leads(&filter);
+            if leads.is_empty() {
+                println!("No leads found.");
+            }
+            for lead in leads {
+                println!("{lead}");
             }
         }),
         LeadCommand::Qualify { id } => {
             write_crm(state, |crm| crm.qualify_lead(id))?;
-            println!("Lead {id} qualified");
+            println!("Lead {id} is qualified");
         }
         LeadCommand::Disqualify { id } => {
             write_crm(state, |crm| crm.disqualify_lead(id))?;
-            println!("Lead {id} disqualified");
+            println!("Lead {id} is disqualified");
         }
         LeadCommand::Convert { id } => {
-            let deal = if input.prompt("Create a deal? (y/n): ").await? == "y" {
+            read_crm(state, |crm| crm.lead(id).map(|_| ()))?; // fail fast before asking questions
+            let deal = if input
+                .prompt("Create a deal? (y/n): ")
+                .await?
+                .eq_ignore_ascii_case("y")
+            {
                 let title = input.prompt("Deal title: ").await?;
-                let value = Money::parse(&input.prompt("Deal value: ").await?)?;
+                let value = Money::parse(&input.prompt("Deal value (e.g. 1250.50): ").await?)?;
                 Some((title, value))
             } else {
                 None
             };
-            let s = write_crm(state, |crm| crm.convert_lead(id, deal))?;
-            match s.deal_id {
-                Some(d) => println!(
-                    "Converted lead {id}: company {}, contact {}, deal {d}",
-                    s.company_id, s.contact_id
-                ),
-                None => println!(
-                    "Converted lead {id}: company {}, contact {}",
-                    s.company_id, s.contact_id
-                ),
+            // The whole conversion happens under one lock: nobody sees a half-converted lead.
+            let summary = write_crm(state, |crm| crm.convert_lead(id, deal))?;
+            print!(
+                "Converted lead {id}: company {}, contact {}",
+                summary.company_id, summary.contact_id
+            );
+            match summary.deal_id {
+                Some(deal_id) => println!(", deal {deal_id}"),
+                None => println!(),
             }
         }
     }
@@ -213,7 +255,8 @@ async fn lead(state: &Mutex<AppData>, input: &mut Input, cmd: LeadCommand) -> an
 
 Note `lead convert`: the whole conversion (remove the lead, insert company/contact/deal, or hand
 the lead back on failure) happens inside **one** `write_crm`. Nobody can ever observe a
-half-converted lead. In Lab 31 the same guarantee comes from a database transaction.
+half-converted lead. In Lab 31 the same guarantee comes from a database transaction. The quick
+`read_crm` before the questions keeps Lab 19's "fail fast before asking" behaviour.
 
 ### Activity logging
 
@@ -223,47 +266,119 @@ async fn log_activity(
     input: &mut Input,
     subject: Subject,
 ) -> anyhow::Result<()> {
-    let kind = match input.prompt("Kind (call/email/meeting): ").await?.as_str() {
+    read_crm(state, |crm| crm.check_subject(subject))?; // fail fast, before asking questions
+    let kind_input = input.prompt("Kind (call/email/meeting): ").await?;
+    let kind = match kind_input.to_lowercase().as_str() {
         "call" => {
-            let minutes = input
-                .prompt("Minutes: ")
-                .await?
-                .parse()
-                .map_err(|_| CrmError::Usage("minutes must be a number"))?;
+            let raw = input.prompt("Duration in minutes: ").await?;
+            let minutes = raw.parse().map_err(|_| ValidationError::InvalidValue {
+                field: "duration in minutes",
+                value: raw,
+            })?;
             ActivityKind::Call { minutes }
         }
         "email" => ActivityKind::Email {
             subject: input.prompt("Email subject: ").await?,
         },
         "meeting" => {
-            let starts = input.prompt("Starts at (YYYY-MM-DD HH:MM): ").await?;
-            let starts_at = NaiveDateTime::parse_from_str(&starts, "%Y-%m-%d %H:%M")
-                .map_err(|_| CrmError::Usage("date format is YYYY-MM-DD HH:MM"))?
-                .and_utc();
-            let attendees = input
-                .prompt("Attendee contact ids (comma separated): ")
-                .await?
-                .split(',')
-                .filter_map(|s| s.trim().parse().ok())
-                .map(ContactId)
-                .collect();
-            ActivityKind::Meeting { starts_at, attendees }
+            let starts_at =
+                parse_datetime(&input.prompt("Starts at (YYYY-MM-DD HH:MM, UTC): ").await?)?;
+            let attendees = parse_contact_ids(
+                &input
+                    .prompt("Attendee contact ids (e.g. 3,5; blank for none): ")
+                    .await?,
+            )?;
+            ActivityKind::Meeting {
+                starts_at,
+                attendees,
+            }
         }
-        _ => return Err(CrmError::Usage("kind must be call, email or meeting").into()),
+        _ => {
+            return Err(ValidationError::InvalidValue {
+                field: "activity kind",
+                value: kind_input,
+            }
+            .into());
+        }
     };
     let summary = input.prompt("Summary: ").await?;
-    let id = write_crm(state, |crm| crm.log_activity(subject, kind, summary, Utc::now()))?;
-    println!("Logged activity {id}");
+    let occurred_at = match optional(
+        input
+            .prompt("When (YYYY-MM-DD HH:MM, UTC; blank for now): ")
+            .await?,
+    ) {
+        Some(raw) => parse_datetime(&raw)?,
+        None => Utc::now(),
+    };
+    let id = write_crm(state, |crm| {
+        crm.log_activity(subject, kind, summary, occurred_at)
+    })?;
+    println!("Logged activity {id} on {subject}");
     Ok(())
 }
 ```
 
-`return Err(CrmError::Usage(…).into())`: `?` does the conversion to `anyhow::Error` for you, but
-a bare `return Err(…)` doesn't, so `.into()` does it by hand.
+`return Err(ValidationError::InvalidValue { … }.into())`: `?` does the conversion to
+`anyhow::Error` for you, but a bare `return Err(…)` doesn't, so `.into()` does it by hand.
+`parse_datetime` and `parse_contact_ids` are unchanged: they never prompted, they only parse.
 
-Finally, delete the old blocking `prompt` function from `cli/mod.rs` (and its now-unused
-`std::io` import) and the `is_mutating` method if you still have it. `cargo clippy --all-targets
--- -D warnings` is clean, which also proves there's no `await_holding_lock` anywhere.
+### The unit test
+
+`unknown_ids_are_not_found` called `execute(&mut crm, command)`. Now `execute` needs the shared
+state and an `Input`, and a test must not read the real stdin. A test-only constructor in
+`src/cli/input.rs` fills the channel with canned answers:
+
+```rust
+    /// Test helper: an `Input` that answers with `lines`, then reports end of input.
+    #[cfg(test)]
+    pub(crate) fn from_lines(lines: &[&str]) -> Self {
+        let (tx, rx) = mpsc::channel(lines.len().max(1));
+        for line in lines {
+            tx.try_send(Ok(line.to_string()))
+                .expect("the channel has room for every line");
+        }
+        Self { lines: rx } // `tx` is dropped here: end of input after the last line
+    }
+```
+
+```rust
+    #[tokio::test]
+    async fn unknown_ids_are_not_found() {
+        let state = Mutex::new(AppData {
+            crm: Crm::new(),
+            dirty: false,
+        });
+        let mut input = Input::from_lines(&[]); // no command below may prompt
+        let commands = [
+            Command::Company(CompanyCommand::Show { id: CompanyId(42) }),
+            Command::Company(CompanyCommand::Delete { id: CompanyId(42) }),
+            Command::Contact(ContactCommand::Show { id: ContactId(42) }),
+            Command::Contact(ContactCommand::Update { id: ContactId(42) }),
+            Command::Contact(ContactCommand::Delete { id: ContactId(42) }),
+        ];
+        for command in commands {
+            let err = execute(&state, &mut input, command).await.unwrap_err();
+            assert!(
+                matches!(
+                    err.downcast_ref::<CrmError>(),
+                    Some(CrmError::NotFound { id: 42, .. })
+                ),
+                "unexpected error: {err:#}"
+            );
+        }
+    }
+```
+
+`#[tokio::test]` gives the test its own runtime so it can `.await`. The command errors arrive as
+`anyhow::Error`; `downcast_ref::<CrmError>()` asks "is the error inside really a `CrmError`?",
+the same `downcast_ref` you used on `dyn Error` in Lab 22. `Input::from_lines(&[])` is end of
+input straight away: if a handler did prompt, the test would fail with "input ended in the
+middle of a command", which is exactly the regression it guards against for `contact update`.
+
+Finally, delete the old blocking `prompt` and `prompt_optional` helpers from `cli/mod.rs` (and
+the now-unused `std::io` import), and the `is_mutating` method if you still have it.
+`cargo clippy --all-targets -- -D warnings` is clean, which also proves there's no
+`await_holding_lock` anywhere.
 
 ---
 
@@ -334,7 +449,10 @@ mod tests {
     }
 
     fn state(dirty: bool) -> Arc<Mutex<AppData>> {
-        Arc::new(Mutex::new(AppData { crm: Crm::default(), dirty }))
+        Arc::new(Mutex::new(AppData {
+            crm: Crm::default(),
+            dirty,
+        }))
     }
 
     // These are #[tokio::test]s: each gets its own single-threaded runtime. A blocking
@@ -357,7 +475,12 @@ mod tests {
         let storage = Arc::new(CountingStorage::default());
         let shared = state(true);
         let (tx, rx) = oneshot::channel();
-        let handle = spawn_autosave(shared.clone(), storage.clone(), Duration::from_millis(20), rx);
+        let handle = spawn_autosave(
+            shared.clone(),
+            storage.clone(),
+            Duration::from_millis(20),
+            rx,
+        );
         tokio::time::sleep(Duration::from_millis(100)).await;
         assert_eq!(storage.saves(), 1, "saved once, then clean");
         assert!(!lock(&shared).dirty);
