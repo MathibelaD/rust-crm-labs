@@ -353,10 +353,12 @@ in `tests/db/deals.rs`. Give it `deals::db::list(&pool, &deals::DealFilter::defa
 - **The repository doesn't know about roles.** It takes a filter that says *what* to return.
   *Why* (the user is a rep) is the handler's decision. This keeps `deals::db` reusable, for
   example by Lab 39's background jobs, which have no user at all.
-- **If your Lab 29/32 `list` already takes filter/pagination parameters** (company, stage, page…),
-  add `owner` to that struct and one more `AND ($n::BIGINT IS NULL OR owner_id = $n)`, or a
-  `push_bind` if you built it with `QueryBuilder` in Lab 32. The `COUNT(*)` for `total`
-  needs the **same** condition, or the count leaks.
+- **`GET /deals` still has Lab 29's `?stage=` / `?company_id=` and its `Page` response.** Since
+  Lab 31 the handler applies those to what `deals::db::list` returns, in memory, then
+  `Page::paginate`s. That keeps working: the *owner* rule moves into SQL, and the other filters
+  and the `total` run on rows the user may see, so nothing leaks. (If you moved those filters into
+  SQL yourself, add `owner` next to them, with the **same** condition in any `COUNT(*)` for
+  `total`, or the count leaks.)
 - The `deals_owner_id_idx` index from Lab 35 is what keeps `owner_id = $1` fast.
 
 > 🟢 **FOLLOW ALONG**: `src/http/deals.rs`: the list handler
@@ -369,7 +371,9 @@ use crate::deals::DealFilter;
 async fn list_deals(
     user: AuthUser,
     State(state): State<AppState>,
-) -> Result<Json<Vec<DealResponse>>, ApiError> {
+    AppQuery(query): AppQuery<DealQuery>,
+    AppQuery(pagination): AppQuery<Pagination>,
+) -> Result<Json<Page<DealResponse>>, ApiError> {
     let filter = DealFilter {
         owner: if policy::can(&user, Action::ViewAllDeals, None) {
             None
@@ -377,8 +381,20 @@ async fn list_deals(
             Some(user.id)
         },
     };
-    let deals = deals::db::list(&state.pool, &filter).await?;
-    Ok(Json(deals.iter().map(DealResponse::from).collect()))
+    let all = deals::db::list(&state.pool, &filter).await?;
+    // Lab 29's query filters and paging, unchanged, on the rows this user may see.
+    let deals: Vec<&Deal> = all
+        .iter()
+        .filter(|d| {
+            query.stage.is_none_or(|stage| d.stage == stage)
+                && query
+                    .company_id
+                    .is_none_or(|id| d.company_id == CompanyId(id))
+        })
+        .collect();
+    Ok(Json(
+        Page::paginate(deals, pagination).map(DealResponse::from),
+    ))
 }
 ```
 
@@ -424,7 +440,7 @@ A 403 is only honest when the caller already knows the record exists (because th
 > 🟢 **FOLLOW ALONG**: `src/http/deals.rs`
 
 ```rust
-// `CrmError` is already imported in this file (create_deal uses it since Lab 29).
+// Add `use crate::errors::CrmError;` (Lab 31's create_deal stopped needing it).
 
 /// Loads a deal and checks `action` on it.
 /// - can't even see it  -> 404, exactly as if it didn't exist
@@ -509,10 +525,14 @@ async fn delete_company(
 
 Here **403 is right**: every user can see every company, so "you may not delete it" leaks nothing.
 
-This breaks one Lab 33 test: `company_with_contacts_cannot_be_deleted` in `tests/api/companies.rs`
-deletes as the `rep@example.com` user Lab 35 gave it, and now gets 403 instead of 409. Once you
-have `login_as` (Step 7), log in as a manager there (`login_as(&app, &pool, "meg@example.com",
-Role::Manager)`, with `app(pool.clone())`) and add a comment saying why.
+This breaks three older tests that delete a company as the `rep@example.com` user Lab 35 gave
+them, and now get 403: `company_with_contacts_cannot_be_deleted` in `tests/api/companies.rs`
+(Lab 33), and Lab 29's `delete_company_then_it_is_gone` (same file) and
+`company_with_contacts_cannot_be_deleted` in `tests/api/contacts.rs`. Once you have `login_as`
+(Step 7), log in as a manager in each (`login_as(&app, &pool, "meg@example.com", Role::Manager)`,
+with `app(pool.clone())`) and add a comment saying why.
+
+`GET /deals` answers a `Page` (Lab 29), so tests that read its list use `body["items"]`.
 
 **Order matters:** authorize *before* touching the database. A rep's `DELETE` is refused
 without even finding out whether the company exists, so it doesn't reveal that either.
@@ -679,14 +699,14 @@ curl -s -w " %{http_code}\n" localhost:3000/admin/users -H "Authorization: Beare
 ## ✅ Expected Result
 
 ```text
-[]
-{"error":{"code":"not_found","message":"deal #1 not found"}} 404
-{"error":{"code":"not_found","message":"deal #999 not found"}} 404
+{"items":[],"page":1,"per_page":20,"total":0}
+{"error":{"code":"not_found","message":"no deal with id 1"}} 404
+{"error":{"code":"not_found","message":"no deal with id 999"}} 404
 {"error":{"code":"forbidden","message":"you are not allowed to do this"}} 403
-[{"id":1,"company_id":1,"title":"Annual licence","value_cents":1200000,"stage":"qualification","owner_id":1}]
+{"items":[{"id":1,"company_id":1,"title":"Annual licence","value_cents":1200000,"stage":"qualification","owner_id":1}],"page":1,"per_page":20,"total":1}
 {"id":1,"company_id":1,"title":"Annual licence","value_cents":1200000,"stage":"qualification","owner_id":3} 200
-[{"id":1,"company_id":1,"title":"Annual licence","value_cents":1200000,"stage":"qualification","owner_id":3}]
-{"error":{"code":"not_found","message":"deal #1 not found"}} 404
+{"items":[{"id":1,"company_id":1,"title":"Annual licence","value_cents":1200000,"stage":"qualification","owner_id":3}],"page":1,"per_page":20,"total":1}
+{"error":{"code":"not_found","message":"no deal with id 1"}} 404
 {"error":{"code":"forbidden","message":"you are not allowed to do this"}} 403
 ```
 
@@ -816,7 +836,7 @@ run before the handler's `authorize`. Authentication always comes before authori
 >
 > | # | Test | Assert |
 > |---|---|---|
-> | 1 | `rep_lists_only_own_deals` | Alice and Bob each create a deal; Alice's `GET /deals` ids == `[hers]` |
+> | 1 | `rep_lists_only_own_deals` | Alice and Bob each create a deal; Alice's `GET /deals` `items` ids == `[hers]` |
 > | 2 | `rep_can_view_and_move_own_deal` | 200 on `GET`; `POST /deals/{id}/stage {"stage":"proposal"}` → 200, stage `proposal` |
 > | 3 | `rep_cannot_see_another_reps_deal` | ✅ done in Step 7 |
 > | 4 | `rep_cannot_move_another_reps_deal` | 404 |

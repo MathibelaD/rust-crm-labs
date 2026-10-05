@@ -1034,11 +1034,11 @@ pub async fn pipeline(db: impl PgExecutor<'_>) -> Result<Vec<PipelineRow>, CrmEr
 
 ```text
 error: SQLx feature `bigdecimal` required for type NUMERIC of column #3 ("total_cents!")
-   --> src/deals/db.rs:117:16
+   --> src/deals/db.rs:140:16
     |
-117 |       let rows = sqlx::query!(
+140 |       let rows = sqlx::query!(
     |  ________________^
-118 | |         r#"SELECT stage, COUNT(*) AS "count!", SUM(value_cents) AS "total_cents!"
+141 | |         r#"SELECT stage, COUNT(*) AS "count!", SUM(value_cents) AS "total_cents!"
 ```
 
 The macro just told you something about Postgres: `SUM` over `BIGINT` returns **`NUMERIC`**
@@ -1184,8 +1184,10 @@ and can only run one statement at a time. That's ownership, not a SQLx limitatio
       The cursor compares all three
 - [ ] the HTTP layer encodes/decodes the position as base64 of `"at|item_type|id"`, rejecting
       unknown types with 422 (`field: "cursor"`)
-- [ ] `GET /history?subject=&limit=&cursor=` returns `{ items, next_cursor }` with the same item
-      JSON as before
+- [ ] `GET /history?subject=&limit=&cursor=` returns `{ items, next_cursor }`. Each item becomes
+      `{"type":"note","id":1,"at":"...","text":"..."}`: Lab 29's `HistoryItemResponse` wrapped the
+      whole activity or note, but a `UNION ALL` only returns the columns both tables share. Like
+      `/activities` in Step 6, that's a breaking change you'd version in a public API
 - [ ] proof: create an activity whose `occurred_at` equals a note's `created_at` exactly (psql
       helps), page with `limit=1`, and every item appears exactly once
 - [ ] decide what happens to Lab 31's `history::merge` and explain why in your commit message

@@ -113,18 +113,17 @@ async fn list_notes(
     Ok(Json(notes.iter().map(NoteResponse::from).collect()))
 }
 
-async fn create_note(
+async fn add_note(
     State(state): State<AppState>,
     AppJson(req): AppJson<CreateNoteRequest>,
 ) -> Result<(StatusCode, Json<NoteResponse>), ApiError> {
-    let new = NewNote {
-        subject: parse_subject(&req.subject)?,
-        body: req.body,
-    };
-    let note = notes::db::insert(&state.pool, &new).await?;
+    let (subject, body) = validate(req)?; // Lab 28's 422s, unchanged
+    let note = notes::db::insert(&state.pool, &NewNote { subject, body }).await?;
     Ok((StatusCode::CREATED, Json(NoteResponse::from(&note))))
 }
 ```
+
+(Imports: `crate::notes::{self, NewNote, Note}`.)
 
 **Reasoning**
 
@@ -133,8 +132,8 @@ async fn create_note(
 - Lab 20 passed `now` *into* `Crm::add_note` for testability. Now the database stamps
   `created_at`, so the clock moves to Postgres. Tests that need fixed times can insert rows with
   explicit timestamps (Lab 33 fixtures do).
-- A blank body: if your Lab 28 validation rejects it, you get a 422 before the database. If not,
-  the `CHECK` makes it a 500. That's a hint to validate at the boundary, and why both layers exist.
+- A blank body: Lab 28's `validate` rejects it with a 422 before the database. Without that, the
+  `CHECK` would make it a 500. That's why both layers exist.
 
 ---
 
@@ -211,7 +210,11 @@ mod tests {
 }
 ```
 
-Handler (`src/http/history.rs`). Your Lab 29 `HistoryItemResponse` conversion from
+This replaces the whole Lab 20 file: `merge_history`, `impl Crm { fn history }` and their
+`Crm`-based tests go. (Lab 20's `Display for HistoryItem` was for the CLI; keep it if you like.)
+
+Handler (`src/http/history.rs`, importing `crate::history::{self, HistoryItem}` and
+`crate::{activities, notes}`). Your Lab 29 `HistoryItemResponse` conversion from
 `HistoryItem<'_>` stays as it was:
 
 ```rust
@@ -241,7 +244,8 @@ now. It never knew where the data came from.
 
 ## 🔵 Your Turn 3 — `pipeline_report` as a free function
 
-`src/deals/report.rs`:
+`src/deals/report.rs` keeps Lab 18's body and `open_total`. Only the input changes, from
+`&self` (a `Crm`) to a slice of deals:
 
 ```rust
 use std::collections::BTreeMap;
@@ -249,27 +253,44 @@ use std::collections::BTreeMap;
 use super::{Deal, DealStage};
 use crate::money::Money;
 
-#[derive(Debug, Clone, PartialEq)]
+/// One line of the pipeline report.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PipelineRow {
     pub stage: DealStage,
     pub count: usize,
     pub total: Money,
 }
 
-/// One row per stage, in stage order, including stages with no deals.
+/// Number of deals and their total value per stage, in pipeline order.
+/// Every stage appears, even when it has no deals.
 pub fn pipeline_report(deals: &[Deal]) -> Vec<PipelineRow> {
-    let mut rows: BTreeMap<DealStage, (usize, Money)> = DealStage::ALL
-        .into_iter()
-        .map(|s| (s, (0, Money::default())))
+    let mut by_stage: BTreeMap<DealStage, (usize, Money)> = DealStage::ALL
+        .iter()
+        .map(|&stage| (stage, (0, Money::ZERO)))
         .collect();
+
     for deal in deals {
-        let entry = rows.entry(deal.stage).or_default();
-        entry.0 += 1;
-        entry.1 += deal.value;
+        let (count, total) = by_stage.entry(deal.stage).or_default();
+        *count += 1;
+        *total += deal.value;
     }
-    rows.into_iter()
-        .map(|(stage, (count, total))| PipelineRow { stage, count, total })
+
+    by_stage
+        .into_iter()
+        .map(|(stage, (count, total))| PipelineRow {
+            stage,
+            count,
+            total,
+        })
         .collect()
+}
+
+/// Number and total value of deals in open (not closed) stages.
+pub fn open_total(rows: &[PipelineRow]) -> (usize, Money) {
+    let open = rows.iter().filter(|row| !row.stage.is_closed());
+    open.fold((0, Money::ZERO), |(count, total), row| {
+        (count + row.count, total + row.total)
+    })
 }
 
 #[cfg(test)]
@@ -288,31 +309,56 @@ mod tests {
         }
     }
 
-    #[test]
-    fn every_stage_appears_in_order_even_when_empty() {
-        let rows = pipeline_report(&[]);
-        let stages: Vec<_> = rows.iter().map(|r| r.stage).collect();
-        assert_eq!(stages, DealStage::ALL);
-        assert!(rows.iter().all(|r| r.count == 0 && r.total == Money::default()));
+    /// The same three deals Lab 18's `crm_with_deals()` built through `Crm`.
+    fn deals() -> Vec<Deal> {
+        vec![
+            deal(1, DealStage::Proposal, 1_000),
+            deal(2, DealStage::Qualification, 2_500),
+            deal(3, DealStage::Won, 400),
+        ]
     }
 
     #[test]
-    fn counts_and_sums_per_stage() {
-        let deals = [
-            deal(1, DealStage::Proposal, 100),
-            deal(2, DealStage::Proposal, 250),
-            deal(3, DealStage::Won, 1_000),
-        ];
-        let rows = pipeline_report(&deals);
-        let proposal = rows.iter().find(|r| r.stage == DealStage::Proposal).unwrap();
-        assert_eq!((proposal.count, proposal.total), (2, Money::from_cents(350)));
+    fn pipeline_report_lists_every_stage_in_order() {
+        let stages: Vec<DealStage> = pipeline_report(&deals()).iter().map(|r| r.stage).collect();
+        assert_eq!(stages, DealStage::ALL);
+    }
+
+    #[test]
+    fn every_stage_appears_even_without_deals() {
+        let rows = pipeline_report(&[]);
+        assert_eq!(rows.len(), DealStage::ALL.len());
+        assert!(rows.iter().all(|r| r.count == 0 && r.total == Money::ZERO));
+    }
+
+    #[test]
+    fn pipeline_report_counts_and_sums_per_stage() {
+        let report = pipeline_report(&deals());
+        assert_eq!(
+            report[0],
+            PipelineRow {
+                stage: DealStage::Qualification,
+                count: 1,
+                total: Money::from_cents(2_500)
+            }
+        );
+        assert_eq!(report[1].count, 1);
+        assert_eq!(report[2].total, Money::ZERO);
+        assert_eq!(report[3].total, Money::from_cents(400));
+    }
+
+    #[test]
+    fn open_total_ignores_closed_stages() {
+        let report = pipeline_report(&deals());
+        assert_eq!(open_total(&report), (2, Money::from_cents(3_500)));
     }
 }
 ```
 
-(`DealStage::ALL` is a `pub const ALL: [DealStage; 5]` on `DealStage`. If your Lab 18 code listed
-the stages differently, use that.) In `src/deals/mod.rs`:
-`pub use report::{PipelineRow, pipeline_report};`.
+(`DealStage::ALL` is Lab 18's `pub const ALL: [DealStage; 5]` on `DealStage`.) In
+`src/deals/mod.rs`: `pub use report::{PipelineRow, open_total, pipeline_report};`. Lab 18's
+`deal_for_unknown_company_is_rejected` test called `Crm::add_deal`; it goes, because the
+`deals_company_id_fkey` foreign key does that job now.
 
 Handler:
 

@@ -307,14 +307,21 @@ async fn delete_contact(
 }
 ```
 
-If your `UpdateContactRequest` validates into something other than `NewContact`, convert into
-whatever `Crm::update_contact` took in Lab 29. The repository signature from the task fixes the
-input type as `&NewContact`.
+Imports: the handlers call `contacts::db::...`, so add `self` to the existing
+`use crate::contacts::{...}` list in `contacts.rs` (and drop the now-unused
+`use crate::errors::CrmError;`). `companies.rs` gets `use crate::contacts;`. Its
+`use super::contacts::ContactResponse;` is the *HTTP* module and doesn't bring the name
+`contacts` into scope.
+
+Since Lab 28, `PUT /contacts/{id}` validates into a `NewContact` and calls
+`Crm::replace_contact(id, NewContact)`, so `contacts::db::update` takes exactly what the handler
+already had. If yours validated into something else, convert it into a `NewContact`: the
+repository signature from the task fixes the input type as `&NewContact`.
 
 And in `src/http/companies.rs`:
 
 ```rust
-async fn company_contacts(
+async fn list_company_contacts(
     State(state): State<AppState>,
     AppPath(id): AppPath<i64>,
 ) -> Result<Json<Vec<ContactResponse>>, ApiError> {

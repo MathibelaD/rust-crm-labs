@@ -106,29 +106,20 @@ cargo remove clap
 Remove `pub mod cli;` from `src/lib.rs`. In `Cargo.toml`, delete the `default-run = "rust-crm"`
 line from Lab 27: with one binary there's nothing to choose between.
 
-`CrmError::UnknownCommand` and `CrmError::Usage` only existed for the REPL. Delete both variants
-from `src/errors.rs`. (If you moved them into a `cli::CliError` in Lab 22, they've already gone
-with `src/cli/`.) Then ask the compiler what else knew about them:
+What about the REPL's own errors? Since Lab 22 they've lived in `cli::CliError`
+(`UnknownCommand`, `Usage`, `Domain`), in `src/cli/error.rs`, so they've just gone with
+`src/cli/`. `CrmError` never had CLI variants, and Lab 28's `status_and_code` never needed an arm
+for them. That's the Lab 22 split paying off one last time: retiring a front-end deletes its
+error type with it, and the domain and HTTP layers don't change at all. Ask the compiler to
+confirm that nothing else knew about the CLI:
 
 ```bash
-cargo check
+cargo check --all-targets
 ```
 
-```text
-error[E0599]: no variant, associated function, or constant named `UnknownCommand` found for enum `CrmError` in the current scope
-  --> src/http/error.rs:58:31
-   |
-58 |                     CrmError::UnknownCommand(_) | CrmError::Usage(_) => {
-   |                               ^^^^^^^^^^^^^^ variant, associated function, or constant not found in `CrmError`
-   |
-  ::: src/errors.rs:18:1
-   |
-18 | pub enum CrmError {
-   | ----------------- variant, associated function, or constant `UnknownCommand` not found for this enum
-```
-
-The only place is the `match` in `ApiError::status_and_code` (your line numbers will differ).
-Delete that arm. This is the payoff of exhaustive matching: deleting a variant gives you a complete to-do list.
+It's clean: the server binary, the library, the unit tests and `tests/` never referenced
+`rust_crm::cli`. (`error_chain` in `src/errors.rs` was mainly the REPL's, but it's `pub` and has
+its own unit tests, so keep it or delete it as you like.)
 
 ```bash
 cargo clippy --all-targets && cargo test
@@ -397,10 +388,10 @@ Then let the compiler drive the rest. You'll get a few dozen errors. Two kinds m
 
 ```text
 error[E0599]: the method `next_id` exists for struct `InMemoryRepo<Company>`, but its trait bounds were not satisfied
-  --> src/crm.rs:59:32
+  --> src/crm.rs:58:51
    |
-59 |             id: self.companies.next_id(),
-   |                                ^^^^^^^ private field, not a method
+58 |         let company = Company::new(self.companies.next_id(), new.name, new.website);
+   |                                                   ^^^^^^^ private field, not a method
    |
   ::: src/companies/model.rs:13:1
    |
@@ -408,12 +399,12 @@ error[E0599]: the method `next_id` exists for struct `InMemoryRepo<Company>`, bu
    | -------------------- doesn't satisfy `CompanyId: From<u64>`
 ...
 note: trait bound `CompanyId: From<u64>` was not satisfied
-  --> src/repo.rs:22:12
+  --> src/repo.rs:68:12
    |
-20 | impl<T: Entity> InMemoryRepo<T>
+66 | impl<T: Entity> InMemoryRepo<T>
    |                 ---------------
-21 | where
-22 |     T::Id: From<u64>,
+67 | where
+68 |     T::Id: From<u64>,
    |            ^^^^^^^^^ unsatisfied trait bound introduced here
 ```
 
@@ -424,14 +415,14 @@ that block (and the method) no longer exists. The fix isn't at the call site. It
 
 ```text
 error[E0308]: mismatched types
-   --> src/http/companies.rs:110:41
+   --> src/http/companies.rs:114:47
     |
-110 |     let c = crm.companies.get(CompanyId(id)).ok_or(not_found(id))?;
-    |                               --------- ^^ expected `i64`, found `u64`
+114 |     let company = crm.companies.get(CompanyId(id)).ok_or(CrmError::NotFound {
+    |                                     --------- ^^ expected `i64`, found `u64`
 ...
 help: you can convert a `u64` to an `i64` and panic if the converted value doesn't fit
     |
-110 |     let c = crm.companies.get(CompanyId(id.try_into().unwrap())).ok_or(not_found(id))?;
+114 |     let company = crm.companies.get(CompanyId(id.try_into().unwrap())).ok_or(CrmError::NotFound {
 ```
 
 **Don't take that suggestion.** The id came from the path extractor (`AppPath<u64>` in your
@@ -441,8 +432,14 @@ before your code runs. Work through the list:
 - `CrmError::NotFound { entity, id: i64 }` in `src/errors.rs`
 - every `AppPath<u64>` → `AppPath<i64>`, every response DTO `id: u64` → `id: i64`, every request
   or query field like `company_id: Option<u64>` → `Option<i64>` (including `ContactQuery`)
-- `Subject`'s `FromStr` parses an `i64`
-- in `tests/api/helpers.rs`, `create_company` now returns `i64` (`body["id"].as_i64()`)
+- `Subject`'s `FromStr` parses an `i64`. Its unit test `rejects_malformed_subjects` still expects
+  `"company:-1"` to fail: `u64` used to reject the minus sign for free, `i64` doesn't. Say it
+  explicitly, right after the parse: `if id <= 0 { return Err(invalid()); }`
+- the test-only `NoteId` in `src/repo.rs`'s `tests` module (`cargo check --all-targets` finds it):
+  `NoteId(i64)` and `From<i64>`
+- in `tests/api/helpers.rs`, `create_company` now returns `i64` (`body["id"].as_i64()`), and so
+  do the test-local `create_deal` / `create_lead` helpers in `tests/api/deals.rs` and
+  `tests/api/leads.rs` (every `u64` and `as_u64()` under `tests/api/` becomes `i64` / `as_i64()`)
 
 ```bash
 cargo check && cargo test
@@ -524,13 +521,13 @@ returning `Result<_, CrmError>` just works. `cargo check`:
 
 ```text
 error[E0004]: non-exhaustive patterns: `&CrmError::Database(_)` not covered
-  --> src/http/error.rs:47:44
+  --> src/http/error.rs:57:44
    |
-47 |                 let (status, code) = match &e {
-   |                                            ^^ pattern `&CrmError::Database(_)` not covered
+57 |             ApiError::Domain(err) => match err {
+   |                                            ^^^ pattern `&CrmError::Database(_)` not covered
 ```
 
-(In your code the `match` is inside `ApiError::status_and_code`. It has no wildcard arm, which is
+(The `match` is the inner one in `ApiError::status_and_code`. It has no wildcard arm, which is
 exactly why this error appears.) Exhaustiveness again: a new error case can't be forgotten. But don't just map it to 500 inside
 `Domain`. A database failure is **our** problem: the details belong in the log, and the client
 gets a generic 500. That's exactly `ApiError::Internal` from Lab 28, so route it there when
@@ -658,14 +655,14 @@ Try it.
 
 ```text
 error: error returned from database: column "nmae" does not exist at line 3838
-  --> src/companies/db.rs:50:15
+  --> src/companies/db.rs:53:15
    |
-50 |       let row = sqlx::query_as!(
+53 |       let row = sqlx::query_as!(
    |  _______________^
-51 | |         CompanyRow,
-52 | |         "SELECT id, nmae, website, lifecycle FROM companies WHERE id = $1",
-53 | |         id.0,
-54 | |     )
+54 | |         CompanyRow,
+55 | |         "SELECT id, nmae, website, lifecycle FROM companies WHERE id = $1",
+56 | |         id.0,
+57 | |     )
    | |_____^
 ```
 
@@ -678,15 +675,16 @@ because the macro produced no code. Fix the first error and they disappear.
 
 ```text
 error[E0277]: the trait bound `std::string::String: From<std::option::Option<std::string::String>>` is not satisfied
-  --> src/companies/db.rs:36:15
+  --> src/companies/db.rs:39:15
    |
-36 |       let row = sqlx::query_as!(
+39 |       let row = sqlx::query_as!(
    |  _______________^
-37 | |         CompanyRow,
-38 | |         "INSERT INTO companies (name, website)
+40 | |         CompanyRow,
+41 | |         "INSERT INTO companies (name, website)
+42 | |          VALUES ($1, $2)
 ...  |
-42 | |         new.website,
-43 | |     )
+45 | |         new.website,
+46 | |     )
    | |_____^ the trait `From<std::option::Option<std::string::String>>` is not implemented for `std::string::String`
 ```
 
@@ -699,9 +697,9 @@ where you expected a string was a runtime error. Here it's a compile error. Ever
 
 ```text
 error[E0308]: mismatched types
-  --> src/companies/db.rs:53:9
+  --> src/companies/db.rs:56:9
    |
-53 |         id,
+56 |         id,
    |         ^^
    |         |
    |         expected `i64`, found `CompanyId`
@@ -889,6 +887,7 @@ tested and shippable.
 use std::sync::{Arc, RwLock};
 
 use sqlx::PgPool;
+use tokio::task;
 
 use crate::crm::Crm;
 use crate::storage::{Storage, StorageError};
@@ -976,7 +975,9 @@ into the new store) and/or dual writes. We don't need that: the JSON data is dev
 > 🟢 **FOLLOW ALONG**: rewrite the handler bodies in `src/http/companies.rs`. Request and response
 > types stay, and so do your Lab 28 `TryFrom<CreateCompanyRequest> for NewCompany` and
 > `TryFrom<UpdateCompanyRequest> for CompanyUpdate` impls. Only the line that used to call `Crm`
-> changes.
+> changes. The handlers call `companies::db::...`, so import the module itself:
+> `use crate::companies::{self, Company, CompanyFilter, ...};`. `crate::errors::CrmError` is no
+> longer used in this file; delete that import (the compiler's warning points at it).
 
 ```rust
 async fn list_companies(
@@ -1035,7 +1036,7 @@ async fn delete_company(
     Ok(StatusCode::NO_CONTENT)
 }
 
-async fn company_contacts(
+async fn list_company_contacts(
     State(_state): State<AppState>,
     AppPath(_id): AppPath<i64>,
 ) -> Result<Json<Vec<ContactResponse>>, ApiError> {
@@ -1043,19 +1044,31 @@ async fn company_contacts(
 }
 ```
 
-Add the two helpers the handlers use to `impl Pagination` in `src/http/pagination.rs`, and make
-`Page::total` an `i64` if it isn't one already (it now comes straight from `COUNT(*)`):
+Add the two helpers the handlers use to `impl Pagination` in `src/http/pagination.rs`. Lab 29
+already has a private `offset() -> usize` (for `Iterator::skip`), and two methods can't share a
+name, so first rename that one to `skip()` (its only caller is `paginate`). Then:
 
 ```rust
     /// SQL `LIMIT`.
     pub fn limit(&self) -> i64 {
-        i64::from(self.normalized().per_page)
+        // `per_page` is at most MAX_PER_PAGE after normalizing, so this always fits.
+        i64::try_from(self.normalized().per_page).expect("per_page <= MAX_PER_PAGE")
     }
+
     /// SQL `OFFSET`: how many rows to skip before this page.
     pub fn offset(&self) -> i64 {
-        i64::from(self.normalized().page - 1) * self.limit()
+        let pages_before = i64::try_from(self.normalized().page - 1).unwrap_or(i64::MAX);
+        pages_before.saturating_mul(self.limit())
     }
 ```
+
+`page` and `per_page` are `usize`, and there's no `i64::from(usize)` (a `usize` *could* be wider
+than `i64`), hence `try_from`. Lab 29's overflow lesson still applies: `?page=18446744073709551615`
+must not panic, so the offset saturates, and Postgres answers an absurd `OFFSET` with no rows.
+
+Make `Page::total` an `i64` too: it now comes straight from `COUNT(*)`. The one line in
+`paginate` that fills it becomes
+`let total = i64::try_from(all.len()).expect("a Vec holds at most i64::MAX items");`.
 
 `Page::paginate` (which sliced a `Vec` in memory) has no caller for companies any more. The
 database does the slicing now. Keep it while other handlers still use it.
@@ -1110,11 +1123,13 @@ Undo the change. The rule from now on: **whenever you add or change a query, run
 `cargo sqlx prepare` and commit `.sqlx/` with the code.** Lab 33 adds a CI check that fails if
 you forget.
 
-**Your Lab 24 CI workflow will break now**: it builds without a database. Add this at the top
-level of `.github/workflows/ci.yml` (Lab 33 rewrites the file properly):
+**Your Lab 24 CI workflow will break now**: it builds without a database. Add one line to the
+top-level `env:` block of `.github/workflows/ci.yml`, next to Lab 24's `CARGO_TERM_COLOR` (a
+second `env:` key would be invalid YAML). Lab 33 rewrites the file properly:
 
 ```yaml
 env:
+  CARGO_TERM_COLOR: always
   SQLX_OFFLINE: "true"
 ```
 
@@ -1140,7 +1155,8 @@ pub fn app() -> Router {
 ```
 
 (Imports: `std::sync::Arc`, `sqlx::postgres::PgPoolOptions`, `rust_crm::crm::Crm`,
-`rust_crm::storage::InMemoryStorage`. Your other helpers (`send`, `get`, `post_json`,
+`rust_crm::storage::InMemoryStorage`, and `rust_crm::http::{AppState, router}` in place of Lab 29's
+`rust_crm::http::{self, AppState}`. Your other helpers (`send`, `get`, `post_json`,
 `create_company`, `error_code`, ...) stay as they are.) `sqlx` is already a normal dependency, so integration tests
 can use it.
 
@@ -1149,11 +1165,13 @@ Every test that would **reach the database** gets marked:
 ```rust
 #[tokio::test]
 #[ignore = "needs database; restored in Lab 33"]
-async fn duplicate_email_is_409() {
+async fn duplicate_email_is_a_conflict() {
 ```
 
-That covers your company tests, the contact tests that insert, and any **deal** test that creates
-its company through `POST /companies` (it would also hit the strangler seam).
+That covers the company tests that get past validation (a 422 or 400 test answers before the
+pool is used), the contact tests that insert, and any **deal** test that creates its company
+through `POST /companies` (it would also hit the strangler seam). The lead tests stay: lead
+conversion still runs entirely in the JSON `Crm`.
 
 > 🟡 **EXPERIMENT**: before ignoring a contacts test, ask: does it reach the database? A test that
 > posts `{"name": "", "email": "nope"}` fails validation in `TryFrom` *before* any repository
@@ -1166,10 +1184,11 @@ cargo test
 
 ```text
 test companies::create_then_get_company ... ignored, needs database; restored in Lab 33
-test companies::unknown_company_is_404 ... ignored, needs database; restored in Lab 33
-test contacts::duplicate_email_is_409 ... ignored, needs database; restored in Lab 33
+test companies::delete_company_then_it_is_gone ... ignored, needs database; restored in Lab 33
 ...
-test result: ok. 2 passed; 0 failed; 5 ignored; 0 measured; 0 filtered out
+test contacts::duplicate_email_is_a_conflict ... ignored, needs database; restored in Lab 33
+...
+test result: ok. 11 passed; 0 failed; 17 ignored; 0 measured; 0 filtered out
 ```
 
 (Your counts depend on your Lab 29 tests.) `cargo test -- --ignored` runs *only* the ignored ones,
@@ -1221,10 +1240,10 @@ HTTP/1.1 409 Conflict
 {"error":{"code":"conflict","message":"a contact with email ada@example.com already exists"}}
 
 HTTP/1.1 404 Not Found
-{"error":{"code":"not_found","message":"company #99 not found"}}
+{"error":{"code":"not_found","message":"no company with id 99"}}
 
 HTTP/1.1 409 Conflict
-{"error":{"code":"conflict","message":"company #1 still has contacts"}}
+{"error":{"code":"conflict","message":"company #1 still has contacts; delete them first"}}
 
 [{"id":1,"name":"Ada Lovelace","email":"ada@example.com","phone":null,"company_id":1}]
 
@@ -1281,7 +1300,7 @@ curl -i -X POST localhost:3000/deals -H 'content-type: application/json' \
 
 ```text
 HTTP/1.1 404 Not Found
-{"error":{"code":"not_found","message":"company #2 not found"}}
+{"error":{"code":"not_found","message":"no company with id 2"}}
 ```
 
 The company exists in Postgres, but deals still look in the JSON `Crm`. Explain in one sentence
@@ -1332,7 +1351,7 @@ here. Keep that in mind for Your Turn 3.
 - [ ] `cargo check` passes against the live database
 
 > 🔵 **YOUR TURN 2: contacts handlers.** Switch every handler in `src/http/contacts.rs` from
-> `state.crm` to your new repository, and implement `company_contacts` in `companies.rs`.
+> `state.crm` to your new repository, and implement `list_company_contacts` in `companies.rs`.
 
 - [ ] `POST /contacts` returns 201, 409 for a duplicate email (whatever its casing), 404 for an
       unknown `company_id`, and 422 listing **all** invalid fields
@@ -1342,7 +1361,7 @@ here. Keep that in mind for Your Turn 3.
 - [ ] `GET /companies/{id}/contacts` returns 404 for an unknown company and `[]` for a company
       without contacts
 - [ ] no handler in `contacts.rs` mentions `state.crm` any more (`Crm::add_contact` /
-      `update_contact` have no HTTP caller now; leave them, Lab 31 deletes `Crm`)
+      `replace_contact` have no HTTP caller now; leave them, Lab 31 deletes `Crm`)
 
 > 🔵 **YOUR TURN 3: deleting a company that has contacts.** Make
 > `DELETE /companies/{id}` answer **409** with `CrmError::HasContacts(id)` when contacts still

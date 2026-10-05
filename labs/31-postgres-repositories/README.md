@@ -346,8 +346,9 @@ The `notes` table is part of Your Turn 1. Run `sqlx migrate run`.
 
 ## Step 4 — Deals
 
-> 🟢 **FOLLOW ALONG**: domain inputs in `src/deals/model.rs`. These replace Lab 29's private
-> `DealInput` in `http/deals.rs` (delete it), because the lead conversion needs them too.
+> 🟢 **FOLLOW ALONG**: domain inputs in `src/deals/model.rs`. They replace Lab 29's private
+> `DealInput` struct in `http/deals.rs` (delete the struct; Step 8 keeps its validation), because
+> the lead conversion needs them too.
 
 ```rust
 /// What a client supplies to open a deal (the company comes from elsewhere,
@@ -375,9 +376,9 @@ pub struct NewDeal {
 impl Validate for NewDealInput {
     fn validate(&self) -> Result<(), ValidationError> {
         if self.title.trim().is_empty() {
-            return Err(ValidationError::EmptyName);
+            return Err(ValidationError::EmptyTitle);
         }
-        if self.value.cents() < 0 {
+        if self.value < Money::ZERO {
             return Err(ValidationError::InvalidMoney(self.value.to_string()));
         }
         Ok(())
@@ -385,7 +386,8 @@ impl Validate for NewDealInput {
 }
 ```
 
-(Use whichever `ValidationError` variants your Lab 29 `DealInput` produced.) Export both from
+(The same two rules, with the same `ValidationError` variants, as Lab 18's `impl Validate for Deal`
+just below it.) Export both from
 `src/deals/mod.rs` and add `pub mod db;`.
 
 Two new `CrmError` variants:
@@ -550,13 +552,45 @@ pub enum LeadStatus {
 }
 ```
 
-Give `LeadStatus` a `Display` (`"new"`, `"qualified"`, `"disqualified"`, `"converted"`) and a
-matching `FromStr`, the same pattern as `LeadSource` and `DealStage`. Your exhaustive `match`es
-will show you where else `Converted` needs handling.
+Lab 19 already gave `LeadStatus` a `Display` and a matching `FromStr`: add `"converted"` to both.
+Your exhaustive `match`es will show you where else `Converted` needs handling. There's one, in
+`Lead::qualify`: a converted lead has already become a customer, so it can't be qualified again.
+Nor disqualified (that would overwrite the history the status exists to keep), so `disqualify`
+gets an error path too. Add a `CrmError` variant for both, and map it to `409 conflict` in
+`status_and_code`:
+
+```rust
+    // src/errors.rs
+    #[error("lead {0} has already been converted")]
+    LeadConverted(LeadId),
+```
+
+```rust
+    // src/leads/model.rs, impl Lead
+    pub fn qualify(&mut self) -> Result<(), CrmError> {
+        match self.status {
+            LeadStatus::New | LeadStatus::Qualified => {
+                self.status = LeadStatus::Qualified;
+                Ok(())
+            }
+            LeadStatus::Disqualified => Err(CrmError::LeadDisqualified(self.id)),
+            LeadStatus::Converted => Err(CrmError::LeadConverted(self.id)),
+        }
+    }
+
+    pub fn disqualify(&mut self) -> Result<(), CrmError> {
+        if self.status == LeadStatus::Converted {
+            return Err(CrmError::LeadConverted(self.id));
+        }
+        self.status = LeadStatus::Disqualified;
+        Ok(())
+    }
+```
 
 `Lead::builder(id, name, email)` takes an **id**, which only made sense when `InMemoryRepo`
-handed them out. Change the builder to produce an id-less `NewLead` (this replaces Lab 29's
-private `LeadInput`):
+handed them out. Change the builder to produce an id-less `NewLead`, and delete `Lead::builder`.
+Lab 19's constructor is `LeadBuilder::new(id, name, email)` (`pub(super)`, in
+`src/leads/builder.rs`, whose fields are private), so `NewLead::builder` calls it without the id:
 
 ```rust
 /// A lead that hasn't been saved yet. New leads always start as `New`.
@@ -570,20 +604,23 @@ pub struct NewLead {
 }
 
 impl NewLead {
+    /// Starts building a lead. `name` and `email` are required; everything else is optional.
     pub fn builder(name: impl Into<String>, email: Email) -> LeadBuilder {
-        LeadBuilder {
-            name: name.into(),
-            email,
-            company_name: None,
-            source: LeadSource::Other,
-            notes: None,
-        }
+        LeadBuilder::new(name.into(), email)
     }
 }
 ```
 
-Remove the `id` field from `LeadBuilder`, and make `build(self) -> Result<NewLead, ValidationError>`.
-The builder's *logic* (validation, defaults, `mem::take` tricks) doesn't change.
+In `builder.rs`, remove the `id` field and the `id` parameter of `LeadBuilder::new`, and make
+`build(self) -> Result<NewLead, ValidationError>` (no `id`, no `status`: a new lead's status is the
+column's `DEFAULT 'new'`). The builder's *logic* (validation, defaults, `non_blank`) doesn't
+change. Its unit tests call `NewLead::builder("Grace Hopper", email())` now, and the
+`assert_eq!(lead.status, LeadStatus::New)` line goes (a `NewLead` has no status). Export
+`NewLead` from `src/leads/mod.rs`.
+
+> ⚠️ From here until Step 9, `src/crm.rs` doesn't compile: it calls `Lead::builder(id, ..)`, and
+> after Step 6 `Lead::convert`. That's expected, since Step 9 deletes it. Read `cargo check`'s
+> errors *outside* `crm.rs` as your to-do list.
 
 > 🟢 **FOLLOW ALONG**: `src/leads/db.rs` (add `pub mod db;` to `src/leads/mod.rs`)
 
@@ -712,8 +749,12 @@ building anything, and `InMemoryRepo::next_id` could hand them out. Postgres han
 the `INSERT`s, inside the transaction. So split "decide" from "write": the pure part becomes a
 **plan**.
 
-> 🟢 **FOLLOW ALONG**: in `src/leads/model.rs`, replace `convert`, `ConversionIds`,
-> `Conversion` and `ConvertError` with:
+> 🟢 **FOLLOW ALONG**: Lab 19 put `convert`, `ConversionIds`, `Conversion`, `ConvertError` and
+> `ConversionSummary` in `src/leads/conversion.rs`. Delete that file (`git rm`), its
+> `mod conversion;` and its `pub use conversion::...` line in `src/leads/mod.rs`
+> (`ConversionSummary` moves to the service below). Add this to `src/leads/model.rs` instead
+> (it needs `crate::companies::{CompanyId, NewCompany}`, `crate::contacts::NewContact`,
+> `crate::deals::NewDealInput` and `crate::entity::Validate`), and export `ConversionPlan`:
 
 ```rust
 /// Everything a conversion will create, decided up front and without ids:
@@ -763,9 +804,11 @@ impl Lead {
 }
 ```
 
-Port your Lab 19 unit tests: "unqualified lead is rejected", "missing company name becomes
-`<name> (individual)`" and the rest. The *assertions* barely change. The rules were never about
-storage.
+Port your Lab 19 unit tests (they were in `conversion.rs`) to the `tests` module of
+`leads/model.rs`: "unqualified lead is rejected", "missing company name becomes
+`<name> (individual)`" and the rest. The builder can't make a `Lead` any more, so give them a
+`lead(status)` helper that builds a `Lead` literal. The *assertions* barely change. The rules were
+never about storage.
 
 And what happened to `ConvertError { lead, reason }`, the type that **handed the lead back** on
 failure (Lab 19's ownership lesson)? `convert(self)` consumed the lead because it had been
@@ -829,7 +872,8 @@ pub async fn convert_lead(
 }
 ```
 
-(`ConversionSummary` used to live in `crm.rs`. It moves here before `crm.rs` is deleted.)
+(`ConversionSummary` used to live in `conversion.rs` next to `convert`. It moves here, to the
+function that returns it.)
 
 ### `&mut *tx`: a reborrow
 
@@ -1096,6 +1140,10 @@ pub async fn list_for_subject(
 - `ensure_subject_exists` then `INSERT` is check-then-act: a subject deleted between the two
   leaves a dangling activity. That's the price of the polymorphic-subject choice in Step 3. For a
   CRM's activity log it's acceptable. For money it wouldn't be.
+- **Meeting attendees.** Lab 20's `Crm::log_activity` also refused a meeting whose `attendees`
+  didn't exist. That check leaves with `Crm`: the ids live inside the JSONB `details`, where no
+  foreign key can reach them. It's the same trade-off as the subject. This course accepts it; a
+  `SELECT COUNT(*) FROM contacts WHERE id = ANY($1)` before the insert would bring it back.
 
 ## Step 8 — Handlers on the pool, `AppState { pool }`
 
@@ -1130,26 +1178,31 @@ async fn convert_lead(
     AppPath(id): AppPath<i64>,
     AppJson(req): AppJson<ConvertLeadRequest>,
 ) -> Result<(StatusCode, Json<ConversionResponse>), ApiError> {
-    let deal = req.deal.map(|d| NewDealInput {
-        title: d.title,
-        value: Money::from_cents(d.value_cents),
-    });
+    // Lab 28's field-level 422 for a bad deal, before any database work.
+    let deal = req.deal.map(validate_deal).transpose()?;
     let summary = leads::service::convert_lead(&state.pool, LeadId(id), deal).await?;
     Ok((StatusCode::CREATED, Json(ConversionResponse::from(summary))))
 }
 
 // src/http/deals.rs
+/// Lab 28's field-level validation, now producing the domain input.
+/// The company id isn't part of it: the handler adds it with `for_company`.
+impl TryFrom<CreateDealRequest> for NewDealInput {
+    type Error = Vec<FieldError>;
+
+    fn try_from(req: CreateDealRequest) -> Result<Self, Self::Error> {
+        // ... the body of Lab 29's `TryFrom<CreateDealRequest> for DealInput`, unchanged,
+        // except that the success arm builds `NewDealInput { title, value }` ...
+    }
+}
+
 async fn create_deal(
     State(state): State<AppState>,
     AppJson(req): AppJson<CreateDealRequest>,
 ) -> Result<(StatusCode, Json<DealResponse>), ApiError> {
-    let input = NewDealInput {
-        title: req.title.trim().to_string(),
-        value: Money::from_cents(req.value_cents),
-    };
-    input.validate().map_err(CrmError::from)?;
-    let deal =
-        deals::db::insert(&state.pool, &input.for_company(CompanyId(req.company_id))).await?;
+    let company_id = CompanyId(req.company_id);
+    let input = NewDealInput::try_from(req)?; // 422 listing every invalid field
+    let deal = deals::db::insert(&state.pool, &input.for_company(company_id)).await?;
     Ok((StatusCode::CREATED, Json(DealResponse::from(&deal))))
 }
 
@@ -1163,27 +1216,34 @@ async fn move_deal(
 }
 
 // src/http/activities.rs
-async fn create_activity(
+async fn log_activity(
     State(state): State<AppState>,
     AppJson(req): AppJson<CreateActivityRequest>,
 ) -> Result<(StatusCode, Json<ActivityResponse>), ApiError> {
+    let input = ActivityInput::validate(req, Utc::now())?; // Lab 28's 422s, unchanged
     let new = NewActivity {
-        subject: parse_subject(&req.subject)?,
-        kind: req.kind,
-        summary: req.summary,
-        occurred_at: req.occurred_at.unwrap_or_else(Utc::now),
+        subject: input.subject,
+        kind: input.kind,
+        summary: input.summary,
+        occurred_at: input.occurred_at,
     };
     let activity = activities::db::insert(&state.pool, &new).await?;
     Ok((StatusCode::CREATED, Json(ActivityResponse::from(&activity))))
 }
 ```
 
+The validation stays where Lab 28 put it, at the HTTP boundary, so every `422` keeps its `fields`
+list (the Lab 29 API tests check them). `validate_deal` in `leads.rs` now returns
+`Result<NewDealInput, Vec<FieldError>>` instead of a `(String, Money)` tuple.
+
 Adapt the rest yourself (they're mechanical): `list_leads`, `create_lead` (keep your Lab 28
-validation, which now ends in `NewLead::builder(...)...build()` and `leads::db::insert`),
-`get_lead`, `disqualify_lead`, `list_deals`, `get_deal`, `list_activities`
-(`activities::db::list_for_subject`). `ConversionResponse` (Lab 29) gets a
-`From<ConversionSummary>` that unwraps the three ids. `parse_subject` stands for however your
-Lab 29 code turns `"deal:3"` into a `Subject` with a 422 on failure (e.g. `SubjectQuery::parse`).
+`LeadInput` validation: its fields now feed `NewLead::builder(name, email).source(..)`, plus
+`.company_name(..)` / `.notes(..)` when present, then
+`let new = builder.build().map_err(CrmError::from)?;` and `leads::db::insert`), `get_lead`,
+`disqualify_lead` (like `qualify_lead`, with `lead.disqualify()?`), `list_deals`, `get_deal`,
+`list_activities` (`activities::db::list_for_subject`). `list_leads` and `list_deals` keep their
+Lab 29 query parameters and `Page` response: load with `leads::db::list` / `deals::db::list`,
+then filter and `Page::paginate` in memory exactly as before. `ConversionResponse` (Lab 29) gets a `From<ConversionSummary>` that unwraps the three ids.
 For `/pipeline`, notes and `/history`, leave the old bodies in place until the Your Turn tasks.
 
 `main.rs` loses the JSON storage: build `AppState { pool }` right after `database::migrate`.
@@ -1200,23 +1260,48 @@ git commit -m "Move deals, leads, activities and notes to Postgres"
 > 🟢 **FOLLOW ALONG**
 
 ```bash
-git rm -r src/storage src/crm.rs src/repo.rs
+git rm -r src/storage src/crm.rs src/repo.rs src/stats.rs src/contacts/queries.rs
 ```
 
-Remove `pub mod storage;`, `pub mod crm;` and `pub mod repo;` from `src/lib.rs`, delete
-`From<StorageError> for ApiError` and `AppState::persist`, drop `crm-data.json` from `.gitignore`
-(and from disk), and run `cargo check`. Each error points at a leftover reference.
+`stats.rs` (Lab 17's `impl Crm { fn stats }`, which only the CLI printed) and
+`contacts/queries.rs` (`impl InMemoryRepo<Contact>`) only make sense on the in-memory types.
+Remove `pub mod storage;`, `pub mod crm;`, `pub mod repo;` and `pub mod stats;` from `src/lib.rs`
+and `mod queries;` from `src/contacts/mod.rs`, delete `From<StorageError> for ApiError` and
+`AppState::persist` (if Step 8 didn't already), drop `crm-data.json` and `crm-data.json.tmp` from
+`.gitignore` (and from disk), and run `cargo check --all-targets`. Each error points at a leftover
+reference. One is a unit test: `error_chain_includes_the_io_cause` in `src/errors.rs` built a
+`StorageError`, so delete it (Lab 30 said `error_chain` itself is yours to keep or drop). The
+`impl Crm` blocks in `history.rs` and `deals/report.rs` are Your Turns 2 and 3.
 
 **The `Entity` trait.** It existed so that `InMemoryRepo<T: Entity>` could ask any entity for its
 id. With `InMemoryRepo` gone, nothing is generic over `Entity` any more. A trait with no generic
-consumer is dead weight (Step 1's rule again), so delete it and its six `impl`s. If your `Display`
-impls called `.label()`, inline what it did. `Validate` stays: handlers call it.
+consumer is dead weight (Step 1's rule again), so delete it, its `find_by_id` helper and its six
+`impl`s. If your `Display` impls called `.label()`, inline what it did. `Validate` stays:
+`plan_conversion` and the tests call it.
 
 **Integration tests.** `tests/common/mod.rs`, `tests/lead_conversion.rs`, `tests/pipeline.rs` and
 `tests/persistence.rs` all built a `Crm`. Delete them. The behaviour they protected comes back as
 database tests in Lab 33, and lead conversion gets *better* tests there (including rollback).
-`tests/validation.rs` only touches domain types and stays. `cargo remove --dev tempfile` (nothing
-writes temporary files any more).
+`tests/validation.rs` stays, but only its first four tests (emails and money) are pure domain:
+delete its `mod common;` line and the three tests that call `sample_crm()` for duplicate emails,
+missing companies and `HasContacts` (Lab 33 brings those rules back as database tests), and port
+`deal_with_empty_title_is_rejected` to the new input type:
+
+```rust
+use rust_crm::deals::NewDealInput;
+use rust_crm::entity::Validate;
+
+#[test]
+fn deal_with_empty_title_is_rejected() {
+    let input = NewDealInput {
+        title: "   ".into(),
+        value: Money::from_cents(100),
+    };
+    assert_eq!(input.validate(), Err(ValidationError::EmptyTitle));
+}
+```
+
+`cargo remove --dev tempfile` (nothing writes temporary files any more).
 
 **If you did Challenge D (tags)**, porting it is optional: a `tags` table plus
 `company_tags` / `contact_tags` join tables with composite primary keys. No later lab depends on it.
@@ -1250,9 +1335,21 @@ pub fn app() -> Router {
 }
 ```
 
-Mark the lead and deal API tests `#[ignore = "needs database; restored in Lab 33"]`. Only
-validation-failure tests still run. That's uncomfortable, and it should be. Lab 33 fixes it
-properly.
+(Drop the `Arc`, `Crm` and `InMemoryStorage` imports.) Mark the lead and deal API tests
+`#[ignore = "needs database; restored in Lab 33"]`, including `deal_for_unknown_company_is_404`
+(the foreign key that answers it lives in Postgres now). Only validation-failure tests still run.
+That's uncomfortable, and it should be. Lab 33 fixes it properly.
+
+One test's *expectation* changes, because the behaviour changed on purpose: the end of
+`qualified_lead_converts_with_a_deal` asserted that the converted lead is gone (404). Now it stays,
+with its new status:
+
+```rust
+    // Since Lab 31 a converted lead stays, for history.
+    let (status, lead) = send(&app, get(&format!("/leads/{id}"))).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(lead["status"], "converted");
+```
 
 ---
 
@@ -1288,7 +1385,7 @@ curl -s -i -X DELETE localhost:3000/companies/1
 {"id":1,"name":"Grace Hopper","email":"grace@navy.test","company_name":"US Navy","source":"referral","status":"new","notes":null}
 
 HTTP/1.1 409 Conflict
-{"error":{"code":"conflict","message":"lead #1 is not qualified"}}
+{"error":{"code":"conflict","message":"lead #1 must be qualified before it can be converted"}}
 
 {"id":1,"name":"Grace Hopper","email":"grace@navy.test","company_name":"US Navy","source":"referral","status":"qualified","notes":null}
 
@@ -1307,10 +1404,10 @@ HTTP/1.1 409 Conflict
 
 {"id":1,"subject":"deal:1","body":"Wants a pilot before Q1","created_at":"2026-10-05T14:43:09.046606Z"}
 
-[{"type":"note","id":1,"at":"2026-10-05T14:43:09.046606Z","text":"Wants a pilot before Q1"},{"type":"activity","id":1,"at":"2026-10-05T09:30:00Z","text":"Discovery call"}]
+[{"type":"note","id":1,"subject":"deal:1","body":"Wants a pilot before Q1","created_at":"2026-10-05T14:43:09.046606Z"},{"type":"activity","id":1,"subject":"deal:1","kind":{"type":"call","minutes":25},"summary":"Discovery call","occurred_at":"2026-10-05T09:30:00Z"}]
 
 HTTP/1.1 409 Conflict
-{"error":{"code":"conflict","message":"company #1 still has contacts"}}
+{"error":{"code":"conflict","message":"company #1 still has contacts; delete them first"}}
 ```
 
 The conversion answers `201 Created` (Lab 29's status). Timestamps and the exact message wording
@@ -1401,23 +1498,27 @@ makes a second concurrent `convert_lead` see `converted` and refuse. (`ROLLBACK;
 - [ ] `created_at` comes from the database (`DEFAULT now()`), not from the request
 - [ ] `POST /notes` and `GET /notes?subject=` work as in Lab 29, with no `state.crm`
 
-> 🔵 **YOUR TURN 2: history from the database.** `HistoryItem<'a>` lived in `crm.rs`, which is
-> gone. Move it to a new `src/history.rs` (`pub mod history;` in `lib.rs`) with a pure function:
+> 🔵 **YOUR TURN 2: history from the database.** `HistoryItem<'a>` lives in `src/history.rs`
+> (Lab 20), but the rest of that file is built on `Crm`: `merge_history` takes two `InMemoryRepo`s
+> and `impl Crm { fn history }` calls it. Replace both with a pure function:
 > ```rust
 > pub fn merge<'a>(activities: &'a [Activity], notes: &'a [Note]) -> Vec<HistoryItem<'a>>
 > ```
 
 - [ ] newest first. `GET /history?subject=` uses the two `list_for_subject` functions + `merge`,
       and returns the same JSON as in Lab 29
-- [ ] a unit test for `merge` with hand-built `Activity`/`Note` values (no database)
+- [ ] a unit test for `merge` with hand-built `Activity`/`Note` values (no database), replacing
+      Lab 20's `Crm`-based tests in that file (subject existence is `ensure_subject_exists` now,
+      and a blank note body is Lab 28's 422)
 - [ ] be ready to explain the `'a` in the signature: why can the result not outlive either slice?
 
 > 🔵 **YOUR TURN 3: the pipeline report without `Crm`.** `impl Crm { fn pipeline_report }` is gone.
 
 - [ ] `pub fn pipeline_report(deals: &[Deal]) -> Vec<PipelineRow>` in `src/deals/report.rs`,
       re-exported as `deals::pipeline_report`: every stage, in stage order, even with no deals
-- [ ] its Lab 18/24 tests ported to call the free function (add `PartialEq` to `PipelineRow`'s
-      derives if it lacks it)
+- [ ] its Lab 18/24 tests ported to call the free function on a hand-built `&[Deal]` instead of
+      `crm_with_deals()` (`open_total` and its test stay; `deal_for_unknown_company_is_rejected`
+      tested `Crm::add_deal` and goes: the foreign key does that job now)
 - [ ] `GET /pipeline` = `deals::db::list` + `pipeline_report`
 
 Then: `cargo sqlx prepare`, `cargo fmt`, `cargo clippy --all-targets -- -D warnings`, `cargo test`.

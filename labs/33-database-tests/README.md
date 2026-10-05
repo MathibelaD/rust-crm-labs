@@ -33,7 +33,7 @@ tests/
 │   ├── main.rs             mod companies; mod contacts; mod deals; mod leads;
 │   └── companies.rs, contacts.rs, deals.rs, leads.rs
 ├── fixtures/               companies.sql, contacts.sql, deals.sql, leads.sql
-└── validation.rs           (from Lab 24, unchanged)
+└── validation.rs           (from Lab 24, trimmed in Lab 31)
 .github/workflows/ci.yml    Postgres service + offline build + cache check + tests
 ```
 
@@ -72,32 +72,33 @@ pub fn app(pool: PgPool) -> Router {
 }
 ```
 
-Remove the `PgPoolOptions` import. Every other helper (`send`, `get`, `post`, `post_json`,
-`put_json`, `delete`, `create_company`, `error_code`) stays as it is.
+Replace the `PgPoolOptions` import with `use sqlx::PgPool;`. Every other helper (`send`, `get`,
+`post`, `post_json`, `put_json`, `delete`, `create_company`, `error_code`) stays as it is.
 
-Now restore one test. In `tests/api/contacts.rs`:
+Now restore one test. In `tests/api/contacts.rs` (add `use sqlx::PgPool;` to its imports):
 
 ```rust
-use axum::http::StatusCode;
-use serde_json::json;
-use sqlx::PgPool;
-
-use crate::helpers::{app, post_json, send};
-
 #[sqlx::test]
-async fn duplicate_email_is_409(pool: PgPool) {
+async fn duplicate_email_is_a_conflict(pool: PgPool) {
     let app = app(pool);
-    let body = json!({ "name": "Ada", "email": "ada@example.com" });
-    send(&app, post_json("/contacts", body.clone())).await;
-    let (status, body) = send(&app, post_json("/contacts", body)).await;
+    let contact = json!({ "name": "Ada", "email": "ada@example.com" });
+    send(&app, post_json("/contacts", contact.clone())).await;
+    let (status, body) = send(&app, post_json("/contacts", contact)).await;
     assert_eq!(status, StatusCode::CONFLICT);
-    assert_eq!(body["error"]["code"], "conflict");
+    assert_eq!(error_code(&body), "conflict");
 }
 ```
 
 Three changes: `#[tokio::test]` → `#[sqlx::test]`, the `#[ignore]` line is gone, and the function
 takes `pool: PgPool`, which the macro supplies. `#[sqlx::test]` also sets up the Tokio runtime, so
 you don't need both attributes.
+
+`app()` now needs a pool, so the *other* API tests don't compile any more, and `tests/api` is one
+crate: nothing in it runs until they're all converted.
+
+> 🔵 **Mini-task**: convert **every** API test the same way: remove each `#[ignore = "needs database; restored in Lab 33"]`,
+> switch to `#[sqlx::test]`, add `pool: PgPool`, and call `app(pool)` (also in the tests that
+> never reached the database: there is no other `app` now). Then run the one you restored first:
 
 ```bash
 docker compose up -d
@@ -106,16 +107,13 @@ cargo test --test api duplicate_email
 
 ```text
 running 1 test
-test contacts::duplicate_email_is_409 ... ok
+test contacts::duplicate_email_is_a_conflict ... ok
 
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 13 filtered out; finished in 0.21s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 27 filtered out; finished in 0.07s
 ```
 
 A whole database was created, migrated, used and dropped in a fraction of a second. Postgres
-creates databases by copying a template, and your migrations are small.
-
-> 🔵 **Mini-task**: convert **every** API test the same way: remove each `#[ignore = "needs database; restored in Lab 33"]`,
-> switch to `#[sqlx::test]`, add `pool: PgPool`, and call `app(pool)`. Then:
+creates databases by copying a template, and your migrations are small. Now all of them:
 
 ```bash
 grep -rn "ignore" tests/    # should print nothing
@@ -211,7 +209,10 @@ async fn list_filters_by_lifecycle_and_search(pool: PgPool) {
 async fn company_with_contacts_cannot_be_deleted(pool: PgPool) {
     let (status, body) = send(&app(pool), delete("/companies/1")).await;
     assert_eq!(status, StatusCode::CONFLICT);
-    assert_eq!(body["error"]["message"], "company #1 still has contacts");
+    assert_eq!(
+        body["error"]["message"],
+        "company #1 still has contacts; delete them first"
+    );
 }
 
 #[sqlx::test(fixtures(path = "../fixtures", scripts("companies")))]
@@ -459,7 +460,7 @@ test leads::failed_deal_insert_rolls_back_company_and_contact ... ok
 test leads::conversion_creates_everything_and_marks_the_lead ... ok
 test leads::failed_contact_insert_rolls_back_the_company ... ok
 
-test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 11 filtered out; finished in 0.31s
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 4 filtered out; finished in 0.15s
 ```
 
 ## Step 5 — When a database test fails, open its database
@@ -647,25 +648,46 @@ including the Your Turn tests:
 
 ```text
      Running unittests src/lib.rs
-test result: ok. 19 passed; 0 failed; 0 ignored; ...
+test result: ok. 70 passed; 0 failed; 0 ignored; ...
 
      Running tests/api/main.rs
-running 14 tests
-test activities::keyset_pages_walk_the_whole_history_once ... ok
+running 35 tests
 test activities::a_tampered_cursor_is_rejected ... ok
 test activities::activity_for_a_missing_subject_is_404 ... ok
-test companies::create_then_get_company ... ok
+test activities::keyset_pages_walk_the_whole_history_once ... ok
+test companies::bad_query_parameter_is_a_400 ... ok
 test companies::company_with_contacts_cannot_be_deleted ... ok
+test companies::create_then_get_company ... ok
+test companies::delete_company_then_it_is_gone ... ok
+test companies::invalid_company_reports_every_field ... ok
+test companies::list_filters_and_paginates ... ok
 test companies::list_filters_by_lifecycle_and_search ... ok
+test companies::malformed_json_is_a_400 ... ok
 test companies::pagination_reports_total_and_page ... ok
 test companies::unknown_company_is_404 ... ok
+test companies::update_replaces_fields ... ok
 test companies::update_replaces_fields_and_validates ... ok
-test contacts::duplicate_email_is_409 ... ok
-test contacts::invalid_contact_reports_every_field ... ok
-test deals::deal_cannot_skip_stages ... ok
-test leads::qualified_lead_converts_with_deal ... ok
-test leads::unqualified_lead_cannot_convert ... ok
-test result: ok. 14 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.80s
+test contacts::company_with_contacts_cannot_be_deleted ... ok
+test contacts::contact_for_unknown_company_is_404 ... ok
+test contacts::create_contact_normalises_email ... ok
+test contacts::duplicate_email_is_a_conflict ... ok
+test contacts::invalid_contact_reports_all_fields ... ok
+test contacts::list_filters_by_company_and_sorts_by_name ... ok
+test contacts::non_numeric_id_is_a_400 ... ok
+test contacts::update_to_taken_email_is_a_conflict ... ok
+test deals::closed_deals_are_final ... ok
+test deals::deal_for_unknown_company_is_404 ... ok
+test deals::negative_value_is_422 ... ok
+test deals::new_deal_starts_in_qualification_with_cents ... ok
+test deals::pipeline_sums_cents_per_stage ... ok
+test deals::skipping_a_stage_is_an_invalid_transition ... ok
+test deals::unknown_stage_is_400 ... ok
+test leads::converting_with_an_invalid_deal_is_422 ... ok
+test leads::disqualify_unknown_lead_is_404 ... ok
+test leads::new_lead_starts_as_new ... ok
+test leads::qualified_lead_converts_with_a_deal ... ok
+test leads::unqualified_lead_cannot_be_converted ... ok
+test result: ok. 35 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.07s
 
      Running tests/db/main.rs
 running 15 tests
@@ -684,15 +706,18 @@ test leads::a_lead_converts_only_once ... ok
 test leads::conversion_creates_everything_and_marks_the_lead ... ok
 test leads::failed_contact_insert_rolls_back_the_company ... ok
 test leads::failed_deal_insert_rolls_back_company_and_contact ... ok
-test result: ok. 15 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.72s
+test result: ok. 15 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.49s
 
      Running tests/validation.rs
-test result: ok. 1 passed; ...
+test result: ok. 5 passed; ...
    Doc-tests rust_crm
 test result: ok. ...
 ```
 
-(Parallel tests finish in any order, so your list won't be sorted like this.) The key facts:
+(Parallel tests finish in any order, so your list won't be sorted like this. With the optional
+history test from Lab 32's Your Turn 2, `tests/db` has 16.)
+
+The key facts:
 **0 ignored**, and no `_sqlx_test` databases left behind:
 
 ```bash
@@ -791,8 +816,8 @@ migrations.
 
 - Your Turn 1: build `NewContact` with `Email::parse("ADA@acme.test").unwrap()`. Parsing
   lowercases, which is why the error mentions the lowercase address.
-- Your Turn 2: `PipelineRow` needs `PartialEq` for `assert_eq!` on whole vectors (Lab 31 Your
-  Turn 3 added it). The fixture's qualification deal is 100000 cents.
+- Your Turn 2: `PipelineRow` needs `PartialEq` for `assert_eq!` on whole vectors (Lab 18
+  already derives it). The fixture's qualification deal is 100000 cents.
 - Your Turn 3: a small `async fn log_calls(app: &Router, n: u32)` helper keeps the test readable.
   Use `format!("2026-01-01T09:{minute:02}:00Z")` for distinct, ordered timestamps. Read
   `body["next_cursor"].as_str().unwrap()` and pass it back as `&cursor=...`. The cursor alphabet

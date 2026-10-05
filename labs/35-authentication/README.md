@@ -847,9 +847,9 @@ before you send requests with one.
 
 ```text
 error[E0277]: the trait bound `FromFn<fn(_, _, Next) -> _ {require_auth}, (), Route, _>: Service<_>` is not satisfied
-   --> src/http/mod.rs:20:22
+   --> src/http/mod.rs:35:22
     |
- 20 |         .route_layer(middleware::from_fn(crate::auth::require_auth));
+ 35 |         .route_layer(middleware::from_fn(crate::auth::require_auth));
     |          ----------- ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ unsatisfied trait bound
     |          |
     |          required by a bound introduced by this call
@@ -871,15 +871,15 @@ the generated type doesn't implement `Service`. `from_fn_with_state(state, ...)`
 
 ```text
 error[E0382]: use of moved value: `state`
-  --> src/http/mod.rs:31:21
+  --> src/http/mod.rs:44:21
    |
-15 | pub fn router(state: AppState) -> Router {
+24 | pub fn router(state: AppState) -> Router {
    |               ----- move occurs because `state` has type `AppState`, which does not implement the `Copy` trait
 ...
-23 |             state,
+36 |             state,
    |             ----- value moved here
 ...
-31 |         .with_state(state)
+44 |         .with_state(state)
    |                     ^^^^^ value used here after move
 ```
 
@@ -952,7 +952,7 @@ sqlx migrate run
 ```
 
 ```text
-error: while executing migration 20261005143916: error returned from database: column "owner_id" of relation "deals" contains null values
+error: while executing migration 20261005170006: error returned from database: column "owner_id" of relation "deals" contains null values at line 6461
 ```
 
 **Why?** `ADD COLUMN ... NOT NULL` without a `DEFAULT` gives every *existing* row a `NULL`
@@ -1078,8 +1078,9 @@ pub async fn insert(db: impl PgExecutor<'_>, new: &NewDeal) -> Result<Deal, CrmE
   (`owner_id` always comes from a verified token or from an existing lead, so in practice
   the foreign-key violation can only be the company's.)
 
-- **Two unit-test helpers** build a `Deal` literal: the `move_to_rejects_invalid_transition`
-  test in `deals/model.rs` and `deal()` in `deals/report.rs`. Give them `owner_id: UserId(1)`.
+- **Two unit-test helpers** build a `Deal` literal: `deal(stage)` in the tests of
+  `deals/model.rs` (Lab 18) and `deal(id, stage, cents)` in `deals/report.rs` (Lab 31). Give them
+  `owner_id: UserId(1)`.
 - **`DealResponse`** gains `pub owner_id: i64`, so clients can see who owns a deal.
 - **The create handler** takes the user and passes it to `for_company`:
 
@@ -1089,12 +1090,9 @@ async fn create_deal(
     State(state): State<AppState>,
     AppJson(req): AppJson<CreateDealRequest>,
 ) -> Result<(StatusCode, Json<DealResponse>), ApiError> {
-    let input = NewDealInput {
-        title: req.title.trim().to_string(),
-        value: Money::from_cents(req.value_cents),
-    };
-    input.validate().map_err(CrmError::from)?;
-    let new = input.for_company(CompanyId(req.company_id), user.id);
+    let company_id = CompanyId(req.company_id);
+    let input = NewDealInput::try_from(req)?; // 422 listing every invalid field
+    let new = input.for_company(company_id, user.id);
     let deal = deals::db::insert(&state.pool, &new).await?;
     Ok((StatusCode::CREATED, Json(DealResponse::from(&deal))))
 }
@@ -1120,16 +1118,13 @@ pub async fn insert(pool: &PgPool, new: &NewNote, created_by: UserId) -> Result<
 //      (bind created_by.0 as the 4th value)
 
 // src/http/notes.rs
-async fn create_note(
+async fn add_note(
     user: AuthUser,
     State(state): State<AppState>,
     AppJson(req): AppJson<CreateNoteRequest>,
 ) -> Result<(StatusCode, Json<NoteResponse>), ApiError> {
-    let new = NewNote {
-        subject: parse_subject(&req.subject)?,
-        body: req.body,
-    };
-    let note = notes::db::insert(&state.pool, &new, user.id).await?;
+    let (subject, body) = validate(req)?;
+    let note = notes::db::insert(&state.pool, &NewNote { subject, body }, user.id).await?;
     Ok((StatusCode::CREATED, Json(NoteResponse::from(&note))))
 }
 ```
@@ -1149,8 +1144,8 @@ red. That's the middleware working. Give the tests a way to log in.
 > 🟢 **FOLLOW ALONG**: add to `tests/api/helpers.rs` (next to Lab 29's `send`, `get`, `post_json`, …)
 
 ```rust
-// extend the existing imports:
-use axum::http::{HeaderValue, Request, StatusCode, header};
+// extend the existing imports (Lab 29's already has `Method`, `Request`, `StatusCode`, `header`):
+use axum::http::{HeaderValue, Method, Request, StatusCode, header};
 use serde_json::{Value, json};
 
 pub const TEST_PASSWORD: &str = "correct horse battery staple";
@@ -1216,8 +1211,10 @@ let (status, body) =
 It's mechanical. A search-and-replace of `send(&app, ` → `send_authed(&app, &token, ` plus one
 `let token = ...` line per test does most of it. Tests written as `send(&app(pool), ...)` need
 the `let app = app(pool);` line first. Helpers that call protected routes need a token parameter
-too: Lab 29's `create_company(app, name)` becomes `create_company(app, &token, name)`, and
-`log_calls` in `tests/api/activities.rs` gains a `token: &str`. Leave `tests/api/auth.rs` alone:
+too: Lab 29's `create_company(app, name)` becomes `create_company(app, &token, name)`, the
+test-local `create_deal` and `move_to` in `tests/api/deals.rs` and `create_lead` in
+`tests/api/leads.rs` gain a `token: &str` the same way, and `log_calls` in
+`tests/api/activities.rs` gains a `token: &str`. Leave `tests/api/auth.rs` alone:
 `/auth/register` is public.
 
 **Fixtures** (`tests/fixtures/*.sql`, Lab 33) that insert deals or leads need an owner now. Add a

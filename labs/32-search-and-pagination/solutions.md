@@ -247,10 +247,31 @@ pub fn decode_history_cursor(token: &str) -> Option<HistoryPosition> {
 }
 ```
 
-The handler (`src/http/history.rs`), with `impl From<HistoryEntry> for HistoryItemResponse` that
-moves the four fields across:
+The handler (`src/http/history.rs`). Lab 29's `HistoryItemResponse` enum wrapped a whole
+`ActivityResponse` / `NoteResponse`, which a `HistoryEntry` can't fill, so it becomes a struct
+with the four fields, keeping the `"type"` key:
 
 ```rust
+#[derive(Debug, Serialize)]
+pub struct HistoryItemResponse {
+    #[serde(rename = "type")]
+    pub item_type: String,
+    pub id: i64,
+    pub at: DateTime<Utc>,
+    pub text: String,
+}
+
+impl From<HistoryEntry> for HistoryItemResponse {
+    fn from(e: HistoryEntry) -> Self {
+        Self {
+            item_type: e.item_type,
+            id: e.id,
+            at: e.at,
+            text: e.text,
+        }
+    }
+}
+
 async fn history(
     State(state): State<AppState>,
     AppQuery(q): AppQuery<SubjectQuery>,
@@ -311,6 +332,11 @@ microsecond timestamp, paged with `limit=2`:
   queries as in `/activities`: per-subject history is small, and the planner still pushes the
   subject filter into both halves of the `UNION ALL`, where the Step 3 indexes serve them.
   `/activities` gets the two-query treatment because it's the one with 5,000-row subjects.
+- **Imports.** `history.rs` (HTTP) now needs `chrono::{DateTime, Utc}`, `FieldError`,
+  `super::pagination::{CursorPage, CursorQuery, decode_history_cursor, encode_history_cursor}` and
+  `crate::history::{self, HistoryEntry, HistoryPosition}`, and no longer uses `ActivityResponse`,
+  `NoteResponse` or `crate::{activities, notes}`. `pagination.rs` imports
+  `crate::history::HistoryPosition`.
 - **What about `merge`?** Postgres now does the merge (a "Merge Append" of two sorted index scans
   is literally your `merge` algorithm). Keeping an unused function "in case" is a liability:
   delete `HistoryItem` and `merge`, and say so in the commit message. Their unit test goes with

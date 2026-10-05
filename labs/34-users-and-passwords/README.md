@@ -1010,7 +1010,7 @@ content-type: application/json
 ```
 
 ```json
-{"error":{"code":"validation_failed","message":"request has invalid fields","fields":[{"field":"email","message":"invalid email address: nope"},{"field":"name","message":"must not be empty"},{"field":"password","message":"must be between 12 and 128 characters"}]}}
+{"error":{"code":"validation_failed","message":"request has invalid fields","fields":[{"field":"email","message":"'nope' is not a valid email address"},{"field":"name","message":"must not be empty"},{"field":"password","message":"must be between 12 and 128 characters"}]}}
 ```
 
 ```text

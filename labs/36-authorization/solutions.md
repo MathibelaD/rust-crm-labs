@@ -297,7 +297,7 @@ async fn rep_lists_only_own_deals(pool: PgPool) {
 
     let (status, body) = send_authed(&app, &alice, get("/deals")).await;
     assert_eq!(status, StatusCode::OK);
-    let ids: Vec<i64> = body
+    let ids: Vec<i64> = body["items"]
         .as_array()
         .unwrap()
         .iter()
@@ -373,7 +373,7 @@ async fn manager_sees_all_deals(pool: PgPool) {
     let bobs = create_deal(&app, &bob).await;
 
     let (_, body) = send_authed(&app, &manager, get("/deals")).await;
-    assert_eq!(body.as_array().unwrap().len(), 2);
+    assert_eq!(body["items"].as_array().unwrap().len(), 2);
     assert_eq!(
         send_authed(&app, &manager, get(&format!("/deals/{bobs}")))
             .await
@@ -629,7 +629,8 @@ pub(crate) async fn ensure_subject_visible(
 }
 ```
 
-`list_deals` becomes `let filter = deal_scope(&user);`, and `load_deal_for` must be `pub(crate)`.
+`list_deals`'s `let filter = DealFilter { .. };` becomes `let filter = deal_scope(&user);`, and
+`load_deal_for` must be `pub(crate)`.
 The exhaustive `match` on `Subject` means that when someone adds `Subject::Lead`, they're forced
 to decide whether leads are shared.
 
@@ -664,13 +665,18 @@ the `try_join!`, and passes `&scope` to `deals::db::search`.
 **Subject-based endpoints: in Rust, like `GET /deals/{id}`.** In `list_activities`,
 `list_notes` and `history`, add `user: AuthUser` and call
 `ensure_subject_visible(&state, &user, subject).await?;` right after `let subject = q.parse()?;`.
-In `create_activity` and `create_note`, parse the subject first, check it, then build the
-`New*` value with it:
+In `log_activity` and `add_note`, check the subject right after Lab 28's validation has parsed
+it, before anything is written:
 
 ```rust
-let subject = parse_subject(&req.subject)?;
+// add_note
+let (subject, body) = validate(req)?;
 ensure_subject_visible(&state, &user, subject).await?;
-let new = NewNote { subject, body: req.body };
+let note = notes::db::insert(&state.pool, &NewNote { subject, body }, user.id).await?;
+
+// log_activity
+let input = ActivityInput::validate(req, Utc::now())?;
+ensure_subject_visible(&state, &user, input.subject).await?;
 ```
 
 **Tests** (in `tests/api/authz.rs`; verified):

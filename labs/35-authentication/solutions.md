@@ -258,16 +258,17 @@ pub async fn insert(
 ```
 
 ```rust
-async fn create_activity(
+async fn log_activity(
     user: AuthUser,
     State(state): State<AppState>,
     AppJson(req): AppJson<CreateActivityRequest>,
 ) -> Result<(StatusCode, Json<ActivityResponse>), ApiError> {
+    let input = ActivityInput::validate(req, Utc::now())?;
     let new = NewActivity {
-        subject: parse_subject(&req.subject)?,
-        kind: req.kind,
-        summary: req.summary,
-        occurred_at: req.occurred_at.unwrap_or_else(Utc::now),
+        subject: input.subject,
+        kind: input.kind,
+        summary: input.summary,
+        occurred_at: input.occurred_at,
     };
     let activity = activities::db::insert(&state.pool, &new, user.id).await?;
     Ok((StatusCode::CREATED, Json(ActivityResponse::from(&activity))))
