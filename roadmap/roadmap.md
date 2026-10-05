@@ -107,7 +107,7 @@ Legend: ♻️ = deliberate refactor lab · 🧪 = introduces a new kind of test
 | 🏁 C | Challenge: CSV Import | Phases 1–6 | `import contacts.csv` | Solved without step-by-step help |
 | **Phase 7** | **Concurrency & Async** | | | |
 | 25 | Threads & Shared State | `thread::spawn`, `move`, `Arc`, `Mutex`, `RwLock`, `Send`/`Sync`, channels | Background autosave thread | You know why the server will need `Arc` |
-| 26 | Async Rust & Tokio ♻️ | futures, `async`/`await`, runtime, `tokio::spawn`, `select!`, `spawn_blocking` | Async autosave, async storage | Ready to serve HTTP |
+| 26 | Async Rust & Tokio ♻️ | futures, `async`/`await`, runtime, `tokio::spawn`, `select!`, `spawn_blocking` | Async REPL + autosave task; file I/O via `spawn_blocking` | Ready to serve HTTP |
 | **Phase 8** | **The CRM Becomes a Web API** | | | |
 | 27 | HTTP & Axum Basics | Router, handlers, extractors, `State`, DTOs | `/health`, `/companies` | The CRM speaks HTTP |
 | 28 | API Errors & Validation | `IntoResponse`, error → status mapping, `TryFrom` DTO → domain | Consistent JSON errors, 422s | A predictable API |
@@ -436,8 +436,9 @@ month. Spec and acceptance tests only.
 - **CRM feature:** a `Storage` trait with `InMemoryStorage` and `JsonFileStorage`,
   selected with `--storage memory|json`.
 - **Outcome:** business logic no longer knows where data lives.
-- **Why it matters:** this boundary is what lets you swap in PostgreSQL (Lab 30) without
-  rewriting the CRM.
+- **Why it matters:** business logic not knowing where data lives is what makes the move to
+  PostgreSQL (Labs 30–31) possible without rewriting the domain. The *shape* of the boundary
+  (whole-snapshot load/save) will change for a database, and you'll see why.
 
 #### Lab 24 — Testing Properly + Continuous Integration 🧪
 - **Rust concepts:** unit vs integration tests (`tests/` only sees your public API, which is
@@ -472,7 +473,8 @@ per-row error report. Spec, constraints and sample files only.
   needed, `#[tokio::main]`, `tokio::spawn` and its `'static + Send` bounds, `tokio::time`,
   `select!`, blocking vs non-blocking (`spawn_blocking`), `tokio::sync::Mutex` vs
   `std::sync::Mutex`.
-- **CRM feature:** autosave becomes a Tokio task; the storage trait goes async.
+- **CRM feature:** the REPL and autosave run on Tokio. The storage trait deliberately stays
+  synchronous (file I/O is blocking) and is called through `spawn_blocking`; async traits come in Lab 31.
 - **Outcome:** an async-ready codebase.
 - **Why it matters:** Axum, SQLx and background jobs are all built on Tokio.
 
@@ -517,9 +519,10 @@ contract only.
   `sqlx-cli`, migrations, designing a schema from your domain types (foreign keys = the IDs from
   Lab 14), connection pools (`PgPool` in `State`), compile-time-checked `query!` /
   `query_as!`, offline mode (`.sqlx/`).
-- **CRM feature:** companies and contacts stored in Postgres. **The CLI and JSON storage are
-  retired.** You'll write down *why* (concurrent writers, querying, integrity) before deleting
-  them.
+- **CRM feature:** companies and contacts stored in Postgres. All ID newtypes become `i64`
+  (Postgres has no unsigned integers). **The terminal CLI is retired.** You'll write down *why*
+  (concurrent writers, querying, integrity) before deleting it. Deals, leads, activities and
+  notes stay on JSON storage for one more lab: a deliberate step-by-step ("strangler") migration.
 - **Outcome:** a real database behind your API.
 
 #### Lab 31 — Repositories on Postgres
@@ -655,7 +658,8 @@ available *after* you submit your own. Optional extension briefs: audit log, con
 | 22 | Ad-hoc errors → layered errors | Errors now cross layers (storage, domain, UI) |
 | 23 | Concrete storage → trait | You're about to need two (then three) backends |
 | 26 | Sync → async | The web server needs it |
-| 30 | CLI and JSON retired | A real backend needs concurrency, integrity and queries |
+| 30 | CLI retired, IDs become `i64` | A real backend needs concurrency, integrity and queries |
+| 31 | JSON storage and in-memory repo retired | Every entity now lives in Postgres; the domain logic survives untouched |
 
 ### Git history tells your learning story
 Every lab ends with at least one meaningful commit, and every lab ends with a tag:
@@ -696,7 +700,7 @@ src/
 ├── main.rs
 ├── lib.rs
 ├── cli/
-├── domain/{companies, contacts, deals, leads, activities, notes}/
+├── companies/  contacts/  deals/  leads/  activities/  notes/
 ├── storage/{mod.rs, memory.rs, json_file.rs}
 └── errors.rs
 tests/

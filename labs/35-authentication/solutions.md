@@ -1,0 +1,390 @@
+# Lab 35 — Solutions
+
+> 🔴 One good answer per task, with the reasoning. Different code that meets the acceptance
+> criteria (and that you can explain) is just as correct.
+
+---
+
+## Your Turn 1 — `bearer_token`
+
+```rust
+use axum::http::{HeaderMap, header::AUTHORIZATION};
+
+pub fn bearer_token(headers: &HeaderMap) -> Result<&str, AuthError> {
+    let value = headers.get(AUTHORIZATION).ok_or(AuthError::MissingToken)?;
+    let value = value.to_str().map_err(|_| AuthError::InvalidToken)?;
+    let (scheme, token) = value.split_once(' ').ok_or(AuthError::InvalidToken)?;
+    let token = token.trim();
+    if !scheme.eq_ignore_ascii_case("bearer") || token.is_empty() {
+        return Err(AuthError::InvalidToken);
+    }
+    Ok(token)
+}
+```
+
+**Reasoning**
+
+- **Lifetimes, without writing any.** The signature is `fn(&HeaderMap) -> Result<&str, _>`.
+  With a single reference input, elision (Lab 10) ties the output to it:
+  `fn<'a>(&'a HeaderMap) -> Result<&'a str, _>`. Every step (`get`, `to_str`, `split_once`,
+  `trim`) returns a sub-slice of the same header bytes, so no `String` is ever allocated, and the
+  borrow checker guarantees the token can't outlive the request headers it points into.
+- **Shadowing `value`** (Lab 02) twice: `&HeaderValue` → `&str`. Each line narrows the type.
+  Nothing needs the old binding.
+- **`split_once(' ')`**, not `strip_prefix("Bearer ")`: it handles every letter case of the scheme
+  (`bearer`, `BEARER`), which HTTP requires (auth schemes are case-insensitive).
+- **Two different errors.** No header at all (`MissingToken`) is the normal state for an
+  anonymous client. A header that's there but malformed (`InvalidToken`) is a broken client. Both are
+  401, but the messages help whoever is debugging the client.
+
+### Tests (every row of the table)
+
+```rust
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::http::HeaderValue;
+
+    fn headers(value: Option<&str>) -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        if let Some(v) = value {
+            headers.insert(AUTHORIZATION, HeaderValue::from_str(v).unwrap());
+        }
+        headers
+    }
+
+    #[test]
+    fn extracts_the_token() {
+        assert_eq!(bearer_token(&headers(Some("Bearer abc.def.ghi"))).unwrap(), "abc.def.ghi");
+    }
+
+    #[test]
+    fn scheme_is_case_insensitive() {
+        assert_eq!(bearer_token(&headers(Some("bearer abc"))).unwrap(), "abc");
+    }
+
+    #[test]
+    fn missing_header_is_missing_token() {
+        assert!(matches!(bearer_token(&headers(None)), Err(AuthError::MissingToken)));
+    }
+
+    #[test]
+    fn other_schemes_and_empty_tokens_are_invalid() {
+        for value in ["Basic dXNlcjpwYXNz", "Bearer", "Bearer   ", "abc.def.ghi"] {
+            assert!(
+                matches!(bearer_token(&headers(Some(value))), Err(AuthError::InvalidToken)),
+                "{value}"
+            );
+        }
+    }
+
+    #[test]
+    fn non_visible_ascii_is_invalid() {
+        let mut headers = HeaderMap::new();
+        headers.insert(AUTHORIZATION, HeaderValue::from_bytes(b"Bearer \xff").unwrap());
+        assert!(matches!(bearer_token(&headers), Err(AuthError::InvalidToken)));
+    }
+}
+```
+
+The loop with a message argument (`"{value}"`) is a small table-driven test: when it fails,
+the message tells you *which* row. Lab 36 builds a whole policy test this way.
+
+> Note `"Bearer   "`: `HeaderValue::from_str` accepts trailing spaces in tests, but real HTTP
+> parsers strip surrounding whitespace from header values. The `trim()` covers both.
+
+---
+
+## Your Turn 2 — `verify_in_background`
+
+```rust
+/// Runs `verify_password` on Tokio's blocking thread pool.
+///
+/// Both arguments are owned: `spawn_blocking` requires a `'static` closure, because the
+/// blocking thread may keep running after the awaiting future is dropped. A `&str` hash
+/// borrowed from the caller can't be proven to live that long (E0521).
+pub async fn verify_in_background(password: SecretString, hash: String) -> Result<bool, AuthError> {
+    tokio::task::spawn_blocking(move || verify_password(&password, &hash)).await?
+}
+```
+
+Same structure as `hash_in_background`: `.await` gives
+`Result<Result<bool, AuthError>, JoinError>`, `?` converts the outer error through
+`#[from] JoinError`, and the inner `Result` is the return value. The `move` closure owns both
+values. When the thread finishes, the `SecretString` is dropped (and zeroed) there.
+
+Why does login pass `String` and not `&str` in the first place? `find_by_email` returned an
+owned `String` inside the tuple, and `dummy_hash()` returns an owned clone. Both arms give the
+`match` the same type, so `hash` can be moved into the thread on either path.
+
+---
+
+## Your Turn 3 — owners for leads and activities
+
+The exact code depends on how your Lab 29–31 leads and activities modules are shaped. Here is the
+change, shown in the shapes this course uses. Apply the *same deltas* to yours.
+
+### Leads
+
+```rust
+// src/leads/db.rs: insert gains the owner
+pub async fn insert(db: impl PgExecutor<'_>, new: &NewLead, owner_id: UserId) -> Result<Lead, CrmError> {
+    let row = sqlx::query_as!(
+        LeadRow,
+        "INSERT INTO leads (name, email, company_name, source, status, notes, owner_id)
+         VALUES ($1, $2, $3, $4, 'new', $5, $6)
+         RETURNING id, name, email, company_name, source, status, notes, owner_id",
+        &new.name,
+        new.email.as_str(),
+        new.company_name.as_deref(),
+        new.source.as_str(),   // or .to_string(), however you stored LeadSource
+        new.notes.as_deref(),
+        owner_id.0,
+    )
+    .fetch_one(db)
+    .await?;
+    Ok(row.try_into()?)
+}
+```
+
+- `LeadRow` gains `owner_id: i64`. Every `SELECT`/`RETURNING` on `leads` lists it.
+- Whether the domain `Lead` gets an `owner_id: UserId` field is your call. If `LeadResponse`
+  should expose the owner (the criteria say yes), the simplest route is: `Lead` gains
+  `pub owner_id: UserId`, `TryFrom<LeadRow>` fills it, and `LeadResponse::from(&Lead)` copies
+  `owner_id.0`. The builder from Lab 19 then needs an owner too. Either `.owner(UserId)` with a
+  `build()` error if missing, or `Lead::builder(id, name, email, owner)`. A required value
+  belongs in the constructor, not an optional setter, so `builder(..., owner)` is the better design.
+- Handler:
+
+```rust
+async fn create_lead(
+    user: AuthUser,
+    State(state): State<AppState>,
+    AppJson(req): AppJson<CreateLeadRequest>,
+) -> Result<(StatusCode, Json<LeadResponse>), ApiError> {
+    let new = NewLead::try_from(req).map_err(ApiError::Validation)?; // your Lab 28 pattern
+    let lead = leads::db::insert(&state.pool, &new, user.id).await?;
+    Ok((StatusCode::CREATED, Json(LeadResponse::from(&lead))))
+}
+```
+
+### Conversion: the deal belongs to the lead's owner
+
+```rust
+// src/leads/model.rs
+pub struct ConversionIds {
+    pub company: CompanyId,
+    pub contact: ContactId,
+    pub deal: DealId,
+    pub owner: UserId,   // NEW: who owns records created by the conversion
+}
+
+// inside Lead::convert, where the Deal is built:
+Deal {
+    id: ids.deal,
+    company_id: ids.company,
+    title,
+    value,
+    stage: DealStage::Qualification,
+    owner_id: ids.owner,
+}
+```
+
+```rust
+// src/leads/service.rs: in convert_lead, the locking SELECT also reads owner_id
+let row = sqlx::query!(
+    "SELECT /* ...your existing columns..., */ owner_id FROM leads WHERE id = $1 FOR UPDATE",
+    id.0,
+)
+.fetch_optional(&mut *tx)
+.await?
+.ok_or(CrmError::NotFound { entity: "lead", id: id.0 })?;
+let owner = UserId(row.owner_id);
+// ... later, when you build ConversionIds { ..., owner }
+```
+
+**Why the lead's owner and not the caller?** "A rep's lead becomes that rep's opportunity" is how
+sales teams think about it: commission and pipeline reporting follow the owner. If a manager
+clicks "convert" for a rep, the deal should still land in the rep's pipeline. Both are valid
+business rules. The point is that it's a *decision*, written down and tested, not an accident of
+which variable was in scope.
+
+**Why does `Lead::convert` get the owner from outside?** It's pure domain logic with unit tests
+(Lab 19). Pure functions don't look things up, so callers pass everything in. That's why
+`ConversionIds` exists in the first place, and the owner is one more "value the new records need".
+Update the unit tests that construct `ConversionIds` with `owner: UserId(1)`.
+
+If your Lab 31 `convert_lead` inserts the deal through `deals::db::insert(&mut *tx, &NewDeal { .. })`
+built from the converted `Deal`, carry `owner_id` across there too. The compiler will point at
+every `NewDeal { .. }` literal that lacks it.
+
+### Activities
+
+```rust
+// src/activities/db.rs
+pub async fn insert(
+    db: impl PgExecutor<'_>,
+    new: &NewActivity,          // or your existing parameters
+    created_by: UserId,
+) -> Result<Activity, CrmError>
+// SQL: INSERT INTO activities (subject_type, subject_id, kind, details, summary, occurred_at, created_by)
+//      VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING ..., created_by
+```
+
+```rust
+async fn log_activity(
+    user: AuthUser,
+    State(state): State<AppState>,
+    AppJson(req): AppJson<CreateActivityRequest>,
+) -> Result<(StatusCode, Json<ActivityResponse>), ApiError> {
+    // ... existing validation and subject-exists check ...
+    let activity = activities::db::insert(&state.pool, &new, user.id).await?;
+    Ok((StatusCode::CREATED, Json(ActivityResponse::from(&activity))))
+}
+```
+
+### The "no owner in DTOs" rule
+
+Check with grep: `grep -rn "owner_id\|created_by" src/http/` should only show **response**
+structs and `user.id` arguments, never a field on a `*Request` struct. If a request DTO had
+`owner_id`, any rep could create deals in a colleague's name, or (worse, after Lab 36) hide deals
+from them.
+
+---
+
+## Your Turn 4 — authentication API tests
+
+```rust
+use crate::helpers::{
+    TEST_PASSWORD, app, error_code, get, post_json, register_and_login, send, send_authed,
+};
+use axum::http::StatusCode;
+use serde_json::json;
+use sqlx::PgPool;
+
+#[sqlx::test]
+async fn login_returns_a_bearer_token(pool: PgPool) {
+    let app = app(pool);
+    register_and_login(&app, "ada@example.com").await;
+    let (status, body) = send(
+        &app,
+        post_json("/auth/login", json!({"email": "ada@example.com", "password": TEST_PASSWORD})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["token_type"], "Bearer");
+    assert_eq!(body["expires_in"], 900);
+}
+
+#[sqlx::test]
+async fn me_returns_the_logged_in_user(pool: PgPool) {
+    let app = app(pool);
+    let token = register_and_login(&app, "ada@example.com").await;
+    let (status, body) = send_authed(&app, &token, get("/me")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["email"], "ada@example.com");
+}
+
+#[sqlx::test]
+async fn protected_routes_require_a_token(pool: PgPool) {
+    let app = app(pool);
+    for uri in ["/me", "/deals", "/companies/1"] {
+        let response = tower::ServiceExt::oneshot(app.clone(), get(uri)).await.unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED, "{uri}");
+        assert_eq!(response.headers()["www-authenticate"], "Bearer");
+    }
+}
+
+#[sqlx::test]
+async fn garbage_token_is_401(pool: PgPool) {
+    let app = app(pool);
+    let (status, body) = send_authed(&app, "not.a.jwt", get("/me")).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert_eq!(error_code(&body), "unauthorized");
+}
+
+#[sqlx::test]
+async fn created_deal_is_owned_by_the_caller(pool: PgPool) {
+    let app = app(pool);
+    let token = register_and_login(&app, "rep@example.com").await;
+    let (_, company) =
+        send_authed(&app, &token, post_json("/companies", json!({"name": "Acme"}))).await;
+    let (status, deal) = send_authed(
+        &app,
+        &token,
+        post_json(
+            "/deals",
+            json!({"company_id": company["id"], "title": "Big", "value_cents": 100}),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let (_, me) = send_authed(&app, &token, get("/me")).await;
+    assert_eq!(deal["owner_id"], me["id"]);
+}
+```
+
+`created_lead_is_owned_by_the_caller` is the same shape against `POST /leads` with your lead
+request body.
+
+**Notes**
+
+- **`/companies/1` doesn't exist**, and we still expect 401, not 404. Authentication comes before
+  routing to the handler, so an anonymous caller learns nothing about which ids exist.
+  (Contrast with an unknown *path*, which gives 404 because of `route_layer`.)
+- **`tower::ServiceExt::oneshot(app.clone(), ...)`**: `oneshot` consumes the service, so we
+  clone the `Router` (cheap: it's `Arc`s inside). Calling it as a fully qualified function avoids
+  needing `use tower::ServiceExt` in this file.
+- **`deal["owner_id"] == me["id"]`** compares two `serde_json::Value`s, so no number conversions are needed.
+
+All of these passed against a real Postgres while this lab was written (with `sqlx::test`
+creating a fresh database per test).
+
+---
+
+## Experiment answers
+
+**1. Signed, not encrypted.** Anyone holding the token can read `sub`, `role`, `iat`, `exp`.
+Adding the email would reveal it to anything that logs or intercepts the header: proxies,
+browser extensions, error trackers. Phone numbers or anything personal: no. Claims should be the
+*minimum* the server needs to authorise a request without a lookup.
+
+**2. Forged admin.** `verify` returns `Err(AuthError::InvalidToken)`. The signature covers
+header **and** payload, so changing a single byte of the payload invalidates it. To forge a token
+the attacker needs `JWT_SECRET`, which is why it's random, at least 32 bytes, kept out of git, and
+(Lab 38) loaded as a secret.
+
+**3. Timing.** Without the dummy hash, unknown emails answer ~15× faster, which an attacker can
+easily measure. The first unknown-email login with the dummy hash in place is slower because
+`LazyLock` computes the dummy hash *on first use*: that request pays for two Argon2 operations
+(create + verify). Later ones reuse it.
+
+**4. Expiry.** `-30` seconds works and `-120` doesn't. `Validation` allows 60 seconds of
+`leeway` for clock differences between the server that issued the token and the one that
+checks it. Lower it (`validation.leeway = 5`) if all your servers have good clocks.
+
+**5. Forgetting the extractor.** Still 401, from the `require_auth` middleware. If the route
+had been put in `public_routes()` by mistake, *nothing* would protect it, and the handler would
+happily create a deal owned by user 1. That's why handlers that need the user must take
+`AuthUser`: the type then makes the dependency impossible to drop silently (it's part of the
+signature, and `owner_id: user.id` won't compile without it).
+
+---
+
+## Checkpoint answers (short)
+
+1. Until `exp`, up to 15 minutes. Close the window with refresh tokens + short access tokens
+   (server state for refresh), a `jti` denylist, or a `token_version` check (a lookup per request).
+2. Header, claims, signature. The HMAC signature, keyed with the server secret, stops tampering.
+   The payload is only base64, so anyone can read it.
+3. A token's header is attacker-controlled. Trusting it enables `alg: none` and algorithm-confusion attacks.
+4. Different messages → user enumeration: fixed by one message. Different timings: fixed by
+   always running exactly one Argon2 verify (dummy hash for unknown users).
+5. `async fn handler(user: AuthUser, ...)`: the handler can only run with a verified user. On
+   failure, the rejection (`ApiError::Unauthorized` → 401 JSON + `WWW-Authenticate`) is the response.
+6. The middleware is a safety net for handlers that don't ask for the user. The extractor is
+   the source of truth for handlers that use it, and its type guarantees they can't run unauthenticated.
+7. Existing rows would get `NULL`, which violates `NOT NULL`. In production: add nullable →
+   backfill with a business-decided owner → `SET NOT NULL` once all code writes it.
+8. Ownership drives authorization (Lab 36). If the client chose it, they could assign work to
+   anyone, or create records outside the access rules.
