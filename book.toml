@@ -1,0 +1,26 @@
+[book]
+title = "Rust CRM Labs"
+description = "Learn Rust by building one real CRM backend from scratch, across 41 hands-on labs."
+language = "en"
+src = "."
+
+[build]
+build-dir = "_book"
+create-missing = false
+# Keep README.md -> README.html so the links written in the labs keep working.
+# (The default "index" preprocessor renames README.md to index.html but not the links to it.)
+use-default-preprocessors = false
+
+[preprocessor.links]
+
+[output.html]
+site-url = "/rust-crm-labs/"
+git-repository-url = "https://github.com/MathibelaD/rust-crm-labs"
+edit-url-template = "https://github.com/MathibelaD/rust-crm-labs/edit/main/{path}"
+
+[output.html.playground]
+# Code blocks are fragments of the learner's CRM, not standalone programs.
+runnable = false
+
+[output.html.search]
+enable = true

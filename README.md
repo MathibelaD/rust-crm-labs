@@ -128,3 +128,16 @@ All 41 labs, the five phase challenges and the capstone are listed in [labs/READ
 Every lab's code was compiled and tested in a throwaway copy while the lab was written, so the
 compiler errors and outputs you see in the labs are real. Your output may differ in small details
 (paths, line numbers, thread ids, timings).
+
+---
+
+## Course website
+
+The course is also published as a website built with [mdBook](https://rust-lang.github.io/mdBook/):
+<https://mathibelad.github.io/rust-crm-labs/>
+
+- `SUMMARY.md` sets the sidebar order. When you add a lab or a challenge, add it there too.
+- `.github/workflows/pages.yml` rebuilds and publishes the site on every push to `main`.
+- To preview locally, install mdBook (`brew install mdbook` or `cargo install mdbook`), then run
+  `scripts/build-book.sh` and open `_book/index.html`. Always build through the script: it keeps
+  `.git/` and other dotfiles out of the published site.

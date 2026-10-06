@@ -70,7 +70,7 @@ A walkthrough of the important lines and *why* they're written that way.
 </details>
 
 ## 🆘 Solution
-> 🔴 **SOLUTION** (optional): see [`solutions.md`](solutions.md). Make a genuine attempt first.
+> 🔴 **SOLUTION** (optional): see `solutions.md` next to this lab's README. Make a genuine attempt first.
 
 ## ✅ Checkpoint
 Answer without looking at the code:

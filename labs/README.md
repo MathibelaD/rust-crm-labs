@@ -4,7 +4,7 @@ Work through these in order, in **your own** `rust-crm` repository. Every lab st
 had at the end of the previous one (`git tag lab-NN`).
 
 Each folder has a `README.md` (the lab) and a `solutions.md` (optional 🔴 solutions, kept separate on
-purpose). Challenges are in [`../challenges/`](../challenges/).
+purpose). Challenges are listed in [Phase Challenges](../challenges/README.md).
 
 | Phase | Lab | Topic |
 |---|---|---|
